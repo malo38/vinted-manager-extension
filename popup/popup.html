@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    body { width: 300px; padding: 16px; font-family: -apple-system, sans-serif; background: #0f0f0f; color: #f0f0f0; margin: 0; }
+    .logo { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+    .logo-text { font-size: 15px; font-weight: 700; color: #00e5a0; }
+    .logo-sub { font-size: 11px; color: #888; }
+    .status { background: #1a1a1a; border: 1px solid #2e2e2e; border-radius: 8px; padding: 12px; margin-bottom: 12px; font-size: 13px; }
+    .status-row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+    .status-row:last-child { margin-bottom: 0; }
+    .label { color: #888; }
+    .value { font-weight: 600; }
+    .connected { color: #00e5a0; }
+    button { width: 100%; padding: 10px; background: #00e5a0; color: #000; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 13px; margin-bottom: 8px; font-family: inherit; }
+    button:hover { opacity: 0.88; }
+    button.secondary { background: #2e2e2e; color: #f0f0f0; }
+    input { width: 100%; padding: 8px; border: 1px solid #2e2e2e; border-radius: 6px; background: #1a1a1a; color: #fff; font-size: 13px; margin-bottom: 8px; box-sizing: border-box; font-family: inherit; }
+    .hint { font-size: 11px; color: #888; margin-top: 8px; line-height: 1.4; }
+    .error { color: #ff5c5c; font-size: 11px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="logo">
+    <div>
+      <div class="logo-text">↗ Vinted Manager</div>
+      <div class="logo-sub">Synchronisation automatique</div>
+    </div>
+  </div>
+
+  <div id="loginSection">
+    <p style="font-size:12px;color:#888;margin-bottom:10px;">Connectez-vous avec votre compte Vinted Manager pour synchroniser vos données automatiquement.</p>
+    <input type="email" id="email" placeholder="Email Vinted Manager" />
+    <input type="password" id="password" placeholder="Mot de passe" />
+    <button id="btnLogin">Se connecter</button>
+    <p id="loginError" class="error"></p>
+  </div>
+
+  <div id="statusSection" style="display:none">
+    <div class="status">
+      <div class="status-row"><span class="label">Statut</span><span class="value connected">● Connecté</span></div>
+      <div class="status-row"><span class="label">Compte Vinted</span><span class="value" id="vintedLogin">—</span></div>
+      <div class="status-row"><span class="label">Dernière sync</span><span class="value" id="lastSync">—</span></div>
+    </div>
+    <button id="btnSync">🔄 Synchroniser maintenant</button>
+    <button class="secondary" id="btnLogout">Déconnexion</button>
+    <p class="hint">💡 Gardez un onglet vinted.fr ouvert pour que la synchronisation automatique fonctionne (toutes les 5 min).</p>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
