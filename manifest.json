@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vinted Manager",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Synchronise automatiquement votre compte Vinted avec Vinted Manager",
   "permissions": ["storage", "alarms", "tabs", "scripting", "notifications"],
   "host_permissions": [

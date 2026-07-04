@@ -113,44 +113,53 @@ async function fetchVintedData() {
           item_count: user.item_count ?? user.given_item_count ?? 0,
         }
 
-        const [ordersRaw, purchasesRaw, wardrobeRaw, inboxRaw] = await Promise.all([
+        const [ordersRaw, purchasesRaw, wardrobeRaw, inboxRaw, walletRaw] = await Promise.all([
           apiGet('/my_orders', { per_page: '100', page: '1', order_type: 'sold' }),
           apiGet('/my_orders', { per_page: '100', page: '1', order_type: 'purchased' }).catch(() => ({ my_orders: [] })),
           apiGet(`/wardrobe/${userId}/items`, { per_page: '100', order: 'newest_first' }),
           apiGet('/inbox', { per_page: '50' }).catch(() => ({ conversations: [] })),
+          // Solde du porte-monnaie : confirmé via /wallet/invoices/current le 2026-07-04
+          // (balance.amount / pending_balance.amount).
+          apiGet('/wallet/invoices/current').catch(() => ({})),
         ])
 
-        // Achats (côté acheteur) : même endpoint que les ventes, filtré par order_type.
-        // Structure confirmée identique à celle des ventes le 2026-07-03 sur un vrai achat
-        // en cours ("Bordereau envoyé au vendeur" / transaction_user_status: "waiting").
-        const achats = (purchasesRaw.my_orders || [])
-          .map(o => ({
-            id: String(o.transaction_id || o.id || ''),
-            titre: o.title || '',
-            prix: parseFloat(o.price?.amount ?? 0),
-            statut: o.status || '',
-            statut_code: o.transaction_user_status || '',
-            date_achat: (o.date || '').slice(0, 10),
-            photo: o.photo?.url || '',
-          }))
-          .filter(a => a.id);
+        const wallet = {
+          balance: parseFloat(walletRaw?.balance?.amount ?? 0),
+          pending_balance: parseFloat(walletRaw?.pending_balance?.amount ?? 0),
+        }
 
-        // Le paramètre order_type de /my_orders ne filtre pas toujours correctement côté
-        // Vinted : une transaction en cours ("waiting") a été vue le 2026-07-03 dans les
-        // deux listes (sold ET purchased) alors qu'il s'agissait d'un simple achat. On
-        // exclut donc des ventes tout ce qui apparaît déjà côté achats.
-        const achatsIds = new Set(achats.map(a => a.id));
-        const ventes = (ordersRaw.my_orders || [])
-          .map(o => ({
-            id: String(o.transaction_id || o.id || ''),
+        // Achats/ventes : le paramètre order_type de /my_orders ne filtre pas toujours
+        // correctement côté Vinted (des ventes réelles vues le 2026-07-04 apparaissaient
+        // dans la liste "purchased", et inversement un achat avait déjà été vu dans les
+        // deux listes le 2026-07-03). On combine donc les deux appels, on dédoublonne par
+        // transaction_id, et le tri achat/vente définitif se fait après coup (en dehors de
+        // ce script injecté) via transaction.current_user_side, le seul champ fiable.
+        const orderEntriesMap = new Map()
+        const addOrder = (o, seenSold, seenPurchased) => {
+          const id = String(o.transaction_id || o.id || '')
+          if (!id) return
+          const existing = orderEntriesMap.get(id)
+          if (existing) {
+            existing.seenSold = existing.seenSold || seenSold
+            existing.seenPurchased = existing.seenPurchased || seenPurchased
+            return
+          }
+          orderEntriesMap.set(id, {
+            id,
+            conversation_id: o.conversation_id || null,
             titre: o.title || '',
             prix: parseFloat(o.price?.amount ?? 0),
             statut: o.status || '',
             statut_code: o.transaction_user_status || '',
-            date_vente: (o.date || '').slice(0, 10),
+            date: (o.date || '').slice(0, 10),
             photo: o.photo?.url || '',
-          }))
-          .filter(v => v.id && !achatsIds.has(v.id));
+            seenSold,
+            seenPurchased,
+          })
+        }
+        ;(ordersRaw.my_orders || []).forEach(o => addOrder(o, true, false))
+        ;(purchasesRaw.my_orders || []).forEach(o => addOrder(o, false, true))
+        const orderEntries = Array.from(orderEntriesMap.values())
 
         const annonces = (wardrobeRaw.items || []).map(i => ({
           id: String(i.id),
@@ -180,7 +189,7 @@ async function fetchVintedData() {
           };
         });
 
-        return { ok: true, data: { user: { id: String(userId), login: user.login || '' }, reputation, ventes, achats, annonces, messages } }
+        return { ok: true, data: { user: { id: String(userId), login: user.login || '' }, reputation, wallet, orderEntries, annonces, messages } }
       } catch (e) {
         return { ok: false, error: e.message }
       }
@@ -191,6 +200,10 @@ async function fetchVintedData() {
   if (!result?.ok) throw new Error(result?.error || 'fetch_failed')
 
   await enrichMessagesWithArticleTitle(tab.id, result.data.messages)
+  const { ventes, achats } = await resolveOrderSides(tab.id, result.data.orderEntries)
+  result.data.ventes = ventes
+  result.data.achats = achats
+  delete result.data.orderEntries
   return result.data
 }
 
@@ -246,6 +259,64 @@ async function enrichMessagesWithArticleTitle(tabId, messages) {
   }
 }
 
+// ── Tri fiable achat/vente ──
+// order_type ne filtre pas toujours correctement côté Vinted (voir plus haut) : le
+// seul champ fiable est transaction.current_user_side ("buyer"/"seller"), renvoyé
+// par /conversations/{id} (confirmé via un vrai objet le 2026-07-04, sur une vente
+// réelle qui apparaissait à tort dans la liste "purchased"). On le met en cache par
+// conversation car il ne change jamais pour une transaction donnée.
+async function resolveOrderSides(tabId, orderEntries) {
+  const { vm_conv_transaction_side } = await chrome.storage.local.get(['vm_conv_transaction_side'])
+  const cache = vm_conv_transaction_side || {}
+  const toFetch = orderEntries.filter(o => o.conversation_id && !cache[o.conversation_id]).slice(0, 25)
+
+  if (toFetch.length) {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (ids) => {
+        async function apiGet(path) {
+          const r = await fetch(`https://www.vinted.fr/api/v2${path}`, {
+            credentials: 'include',
+            headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          })
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json()
+        }
+        const out = {}
+        for (const id of ids) {
+          try {
+            const detail = await apiGet(`/conversations/${id}`)
+            const tx = detail.transaction || detail.conversation?.transaction || {}
+            out[id] = tx.current_user_side || ''
+          } catch {
+            out[id] = ''
+          }
+        }
+        return out
+      },
+      args: [toFetch.map(o => o.conversation_id)],
+    }).then(r => r?.[0]?.result || {}).catch(() => ({}))
+
+    for (const [id, side] of Object.entries(results)) {
+      if (side) cache[id] = side
+    }
+    await chrome.storage.local.set({ vm_conv_transaction_side: cache })
+  }
+
+  const ventes = []
+  const achats = []
+  for (const o of orderEntries) {
+    const side = cache[o.conversation_id]
+    // Tant que le côté n'est pas encore résolu (plafonné à 25 nouvelles résolutions
+    // par sync), on se rabat sur l'ancienne heuristique le temps que ça se résorbe.
+    const isVente = side ? side === 'seller' : (o.seenSold && !o.seenPurchased)
+    const base = { id: o.id, titre: o.titre, prix: o.prix, statut: o.statut, statut_code: o.statut_code, photo: o.photo }
+    if (isVente) ventes.push({ ...base, date_vente: o.date })
+    else achats.push({ ...base, date_achat: o.date })
+  }
+  return { ventes, achats }
+}
+
 // ── Notifications de nouveaux messages Vinted ──
 async function notifyNewMessages(messages) {
   const { vm_notified_msg_keys } = await chrome.storage.local.get(['vm_notified_msg_keys'])
@@ -281,6 +352,7 @@ async function syncVinted() {
       vinted_user_id: data.user.id,
       vinted_login: data.user.login,
       reputation: data.reputation,
+      wallet: data.wallet,
       ventes: data.ventes,
       achats: data.achats,
       annonces: data.annonces,
