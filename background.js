@@ -341,6 +341,234 @@ async function notifyNewMessages(messages) {
   await chrome.storage.local.set({ vm_notified_msg_keys: updatedKnown })
 }
 
+// ── Message automatique aux favoris ──
+// Un seul envoi par cycle de sync (toutes les 5 min, voir SYNC_INTERVAL_MIN) :
+// pas de rafale ni d'attente artificielle dans le service worker (qui risque
+// d'être tué par Chrome pendant une longue attente), le rythme de l'alarme
+// suffit à espacer les envois naturellement.
+async function runAutoMessageFavoris() {
+  const config = await backendFetch('GET', '/api/extension/automessage-config')
+  if (!config?.enabled) return
+  if (config.sent_today >= config.daily_limit) return
+
+  const tab = await getVintedTab()
+  if (!tab) return
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: async () => {
+      async function apiGet(path) {
+        const r = await fetch(`https://www.vinted.fr/api/v2${path}`, {
+          credentials: 'include',
+          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        })
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${path}`)
+        return r.json()
+      }
+
+      // 1. Notifications de favoris : reconnaissables par "?offering_id=" dans
+      // leur lien (confirmé le 2026-07-02, revalidé via le repo GitHub
+      // callycodes/vinted-seller-bot qui documente le même format).
+      let notifications = []
+      for (let page = 1; page <= 5; page++) {
+        const data = await apiGet(`/notifications?page=${page}&per_page=20`)
+        const batch = data.notifications || []
+        notifications.push(...batch)
+        if (batch.length < 20) break
+      }
+      const favoriteNotifs = notifications.filter(n => n.link && n.link.includes('?offering_id='))
+
+      // 2. Conversations déjà existantes : jamais recontacter quelqu'un avec
+      // qui une conversation existe déjà sur cet article (dédoublonnage).
+      const existingConvIds = new Set()
+      for (let page = 1; page <= 5; page++) {
+        const data = await apiGet(`/inbox?page=${page}&per_page=20`)
+        const batch = data.conversations || []
+        batch.forEach(c => existingConvIds.add(String(c.id)))
+        if (batch.length < 20) break
+      }
+
+      // 3. Résoudre l'id de conversation en suivant la redirection réelle du
+      // lien de la notification (fetch classique : le navigateur suit la
+      // redirection que Vinted fait vers /inbox/{conversationId}, exactement
+      // ce qui se passe quand un humain clique sur la notification — aucun
+      // contournement, on utilise le vrai mécanisme de Vinted).
+      for (const n of favoriteNotifs) {
+        try {
+          const res = await fetch(n.link, { credentials: 'include' })
+          const match = res.url.match(/\/inbox\/(\d+)/)
+          if (!match) continue
+          const conversationId = match[1]
+          if (existingConvIds.has(conversationId)) continue
+          const nameMatch = (n.body || '').match(/">([^<]+)<\/a>/)
+          return { conversationId, notifId: String(n.id), name: nameMatch ? nameMatch[1] : '' }
+        } catch {
+          continue
+        }
+      }
+      return null
+    },
+  })
+
+  const found = results?.[0]?.result
+  if (!found) return
+
+  const message = (config.template || '').replace(/\{item\}/g, found.name || 'cet article')
+  if (!message.trim()) return
+
+  const sendResult = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: async (conversationId, message) => {
+      const r = await fetch(`https://www.vinted.fr/api/v2/conversations/${conversationId}/replies`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ reply: { body: message, photo_temp_uuids: null } }),
+      })
+      return r.ok
+    },
+    args: [found.conversationId, message],
+  })
+
+  if (sendResult?.[0]?.result) {
+    await backendFetch('POST', '/api/extension/mark-messaged', {
+      id: found.notifId,
+      recipient_login: found.name,
+      message,
+    })
+  }
+}
+
+// ── Republication automatique (delete + recreate honnête, sans retouche) ──
+// Un seul article republié par cycle de sync, pour les mêmes raisons que le
+// message aux favoris ci-dessus. Ordre volontairement "créer d'abord, puis
+// supprimer l'ancien" : si la création échoue en cours de route, l'annonce
+// d'origine reste intacte plutôt que de se retrouver supprimée pour rien.
+async function runAutoRepublish() {
+  const config = await backendFetch('GET', '/api/extension/republish-config')
+  if (!config?.enabled) return
+  if (config.republished_today >= config.daily_limit) return
+  const targetItemId = (config.eligible_vinted_item_ids || [])[0]
+  if (!targetItemId) return
+
+  const tab = await getVintedTab()
+  if (!tab) return
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: async (itemId) => {
+      async function apiGet(path) {
+        const r = await fetch(`https://www.vinted.fr/api/v2${path}`, {
+          credentials: 'include',
+          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        })
+        if (!r.ok) throw new Error(`GET ${path} -> HTTP ${r.status}`)
+        return r.json()
+      }
+
+      try {
+        // 1. Détails complets de l'annonce actuelle (champs confirmés via une
+        // vraie réponse GET /items/{id} référencée par un projet tiers open
+        // source — pas encore revérifiés sur un vrai compte VintControl : à
+        // confirmer lors du premier test réel).
+        const detail = await apiGet(`/items/${itemId}`)
+        const item = detail.item || detail
+
+        let colors = Array.isArray(item.colors) ? [...item.colors] : []
+        for (let i = 0; i < 20; i++) {
+          const key = `color${i}_id`
+          if (item[key] != null) colors.push(item[key])
+        }
+
+        // 2. Retélécharger chaque photo existante (déjà publique sur le CDN
+        // Vinted) et la réuploader telle quelle — aucune retouche.
+        const tempUuid = crypto.randomUUID()
+        const photoIds = []
+        for (const photo of (item.photos || [])) {
+          const url = typeof photo === 'string' ? photo : photo.url
+          if (!url) continue
+          const blob = await (await fetch(url)).blob()
+          const form = new FormData()
+          form.append('photo[type]', 'item')
+          form.append('photo[file]', blob, 'photo.jpg')
+          form.append('photo[temp_uuid]', tempUuid)
+          const uploadRes = await fetch('https://www.vinted.fr/api/v2/photos', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            body: form,
+          })
+          if (!uploadRes.ok) throw new Error(`photo upload -> HTTP ${uploadRes.status}`)
+          const uploadData = await uploadRes.json()
+          photoIds.push(uploadData.id ?? uploadData.photo?.id)
+        }
+        if (!photoIds.length) throw new Error('no_photo_uploaded')
+
+        // 3. Créer la nouvelle annonce, à l'identique (même titre, description,
+        // marque, taille, catégorie, couleurs, état, prix), avant de toucher
+        // à l'ancienne.
+        const createRes = await fetch('https://www.vinted.fr/api/v2/items', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({
+            item: {
+              id: null,
+              currency: item.currency || 'EUR',
+              temp_uuid: tempUuid,
+              title: item.title,
+              description: item.description,
+              brand: item.brand,
+              size_id: item.size_id,
+              catalog_id: item.catalog_id,
+              status_id: item.status_id,
+              package_size_id: item.package_size_id,
+              is_unisex: item.is_unisex ?? false,
+              price: item.original_price_numeric ?? item.price,
+              color_ids: colors,
+              assigned_photos: photoIds.map(id => ({ id, orientation: 0 })),
+              measurement_length: item.measurement_length ?? null,
+              measurement_width: item.measurement_width ?? null,
+              item_attributes: [{ code: 'material', ids: [] }],
+            },
+            feedback_id: null,
+          }),
+        })
+        if (!createRes.ok) throw new Error(`create item -> HTTP ${createRes.status}`)
+        const createData = await createRes.json()
+        const newItemId = createData.item?.id ?? createData.id
+        if (!newItemId) throw new Error('no_new_item_id')
+
+        // 4. Seulement maintenant, supprimer l'ancienne annonce.
+        const deleteRes = await fetch(`https://www.vinted.fr/api/v2/items/${itemId}/delete`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        })
+        if (!deleteRes.ok) {
+          // La nouvelle annonce existe mais l'ancienne aussi encore : pas
+          // grave en soi (pas de perte), mais à signaler pour éviter un
+          // doublon persistant.
+          return { ok: true, newItemId, oldItemDeleteFailed: true }
+        }
+
+        return { ok: true, newItemId }
+      } catch (e) {
+        return { ok: false, error: e.message }
+      }
+    },
+    args: [targetItemId],
+  })
+
+  const result = results?.[0]?.result
+  if (!result?.ok) return
+
+  await backendFetch('POST', '/api/extension/mark-republished', {
+    old_vinted_item_id: String(targetItemId),
+    new_vinted_item_id: String(result.newItemId),
+  })
+}
+
 // ── Sync principale ──
 async function syncVinted() {
   const { token } = await getConfig()
@@ -386,7 +614,16 @@ async function syncVinted() {
 chrome.alarms.create('sync', { periodInMinutes: SYNC_INTERVAL_MIN })
 chrome.alarms.create('refresh_token', { periodInMinutes: 45 })
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'sync') await syncVinted()
+  if (alarm.name === 'sync') {
+    const result = await syncVinted()
+    // Les deux automatisations ont besoin d'un onglet Vinted valide et d'une
+    // synchro qui vient de réussir (données à jour côté backend) avant de
+    // s'exécuter — inutile de les tenter si la synchro elle-même a échoué.
+    if (result.ok) {
+      await runAutoMessageFavoris().catch(() => {})
+      await runAutoRepublish().catch(() => {})
+    }
+  }
   if (alarm.name === 'refresh_token') await refreshAuthToken()
 })
 
