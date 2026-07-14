@@ -346,97 +346,147 @@ async function notifyNewMessages(messages) {
 // pas de rafale ni d'attente artificielle dans le service worker (qui risque
 // d'être tué par Chrome pendant une longue attente), le rythme de l'alarme
 // suffit à espacer les envois naturellement.
+// Extrait le CSRF (échappé dans le HTML, pas une balise <meta>) et l'anon-id
+// (cookie) — seule partie qui doit tourner dans le contexte de la page.
+async function getVintedAuthTokens(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const m = document.documentElement.innerHTML.match(/CSRF_TOKEN\\*"\s*:\s*\\*"([a-f0-9-]{20,})/i)
+      const anonIdMatch = document.cookie.match(/(?:^|;\s*)anon_id=([^;]+)/)
+      return { csrf: m ? m[1] : null, anonId: anonIdMatch ? decodeURIComponent(anonIdMatch[1]) : null }
+    },
+  })
+  return results?.[0]?.result || {}
+}
+
 async function runAutoMessageFavoris() {
   const config = await backendFetch('GET', '/api/extension/automessage-config')
-  if (!config?.enabled) return
-  if (config.sent_today >= config.daily_limit) return
+  if (!config?.enabled) return { ok: false, error: 'disabled', config }
+  if (config.sent_today >= config.daily_limit) return { ok: false, error: 'daily_limit_reached', config }
 
   const tab = await getVintedTab()
-  if (!tab) return
+  if (!tab) return { ok: false, error: 'no_vinted_tab' }
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: async () => {
-      async function apiGet(path) {
-        const r = await fetch(`https://www.vinted.fr/api/v2${path}`, {
-          credentials: 'include',
-          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-        })
-        if (!r.ok) throw new Error(`HTTP ${r.status} ${path}`)
-        return r.json()
-      }
+  let { csrf, anonId } = await getVintedAuthTokens(tab.id)
+  if (!csrf) {
+    // Repli : la page ouverte ne contient pas le token, on va le chercher
+    // sur une page qui l'a toujours (/items/new). Cette requête part du
+    // service worker (pas de la page) pour ne pas dépendre du contexte
+    // d'un onglet précis.
+    const r = await fetch('https://www.vinted.fr/items/new', { credentials: 'include' })
+    const html = await r.text()
+    const m = html.match(/CSRF_TOKEN\\*"\s*:\s*\\*"([a-f0-9-]{20,})/i)
+    csrf = m ? m[1] : null
+  }
+  if (!csrf) return { ok: false, error: 'no_csrf_token' }
 
-      // 1. Notifications de favoris : reconnaissables par "?offering_id=" dans
-      // leur lien (confirmé le 2026-07-02, revalidé via le repo GitHub
-      // callycodes/vinted-seller-bot qui documente le même format).
-      let notifications = []
-      for (let page = 1; page <= 5; page++) {
-        const data = await apiGet(`/notifications?page=${page}&per_page=20`)
-        const batch = data.notifications || []
-        notifications.push(...batch)
-        if (batch.length < 20) break
-      }
-      const favoriteNotifs = notifications.filter(n => n.link && n.link.includes('?offering_id='))
+  const authHeaders = {
+    Accept: 'application/json, text/plain, */*',
+    'X-Requested-With': 'XMLHttpRequest',
+    'x-csrf-token': csrf,
+    ...(anonId ? { 'x-anon-id': anonId } : {}),
+  }
 
-      // 2. Conversations déjà existantes : jamais recontacter quelqu'un avec
-      // qui une conversation existe déjà sur cet article (dédoublonnage).
-      const existingConvIds = new Set()
-      for (let page = 1; page <= 5; page++) {
-        const data = await apiGet(`/inbox?page=${page}&per_page=20`)
-        const batch = data.conversations || []
-        batch.forEach(c => existingConvIds.add(String(c.id)))
-        if (batch.length < 20) break
-      }
+  // Les appels réseau tournent depuis le service worker (pas injectés dans
+  // l'onglet) : api.vinted.fr rejette les requêtes cross-origin faites
+  // depuis le contexte de la page www.vinted.fr (CORS), alors qu'une requête
+  // faite par l'extension elle-même (host_permissions déclarées) n'y est pas
+  // soumise (confirmé le 2026-07-14 après plusieurs échecs "Failed to fetch"
+  // en injection).
+  let notifications = []
+  try {
+    for (let page = 1; page <= 5; page++) {
+      const r = await fetch(`https://api.vinted.fr/inbox-notifications/v1/notifications?page=${page}&per_page=20`, {
+        credentials: 'include',
+        headers: authHeaders,
+      })
+      if (!r.ok) return { ok: false, error: `notifications HTTP ${r.status}` }
+      const data = await r.json()
+      const batch = data.notifications || []
+      notifications.push(...batch)
+      if (batch.length < 20) break
+    }
+  } catch (e) {
+    return { ok: false, error: 'notifications_fetch_failed', message: e.message }
+  }
+  // Deux formats de lien observés le même jour (2026-07-14) pour une même
+  // notification de favori : "/items/{id}/want_it/new?offering_id=X" (juste
+  // après le like) et "vintedfr://messaging?item_id=X&user_id=Y" (une fois
+  // affichée dans la liste). On accepte les deux — le second est plus direct
+  // (item_id + user_id explicites, plus besoin de deviner via subject_id).
+  const favoriteNotifs = notifications.filter(n =>
+    n.link && (n.link.includes('?offering_id=') || /messaging\?item_id=\d+&user_id=\d+/.test(n.link))
+  )
 
-      // 3. Résoudre l'id de conversation en suivant la redirection réelle du
-      // lien de la notification (fetch classique : le navigateur suit la
-      // redirection que Vinted fait vers /inbox/{conversationId}, exactement
-      // ce qui se passe quand un humain clique sur la notification — aucun
-      // contournement, on utilise le vrai mécanisme de Vinted).
-      for (const n of favoriteNotifs) {
-        try {
-          const res = await fetch(n.link, { credentials: 'include' })
-          const match = res.url.match(/\/inbox\/(\d+)/)
-          if (!match) continue
-          const conversationId = match[1]
-          if (existingConvIds.has(conversationId)) continue
-          const nameMatch = (n.body || '').match(/">([^<]+)<\/a>/)
-          return { conversationId, notifId: String(n.id), name: nameMatch ? nameMatch[1] : '' }
-        } catch {
-          continue
-        }
-      }
-      return null
-    },
-  })
-
-  const found = results?.[0]?.result
-  if (!found) return
-
-  const message = (config.template || '').replace(/\{item\}/g, found.name || 'cet article')
-  if (!message.trim()) return
-
-  const sendResult = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: async (conversationId, message) => {
-      const r = await fetch(`https://www.vinted.fr/api/v2/conversations/${conversationId}/replies`, {
+  // Résoudre chaque favori en vraie conversation via le même appel que fait
+  // le frontend de Vinted en arrière-plan quand on ouvre la notification
+  // (confirmé le 2026-07-14 par capture réseau réelle — le lien de
+  // redirection utilisé jusqu'ici est mort, Vinted route ça côté client
+  // désormais). Idempotent : retrouve la conversation existante si elle
+  // l'est déjà, sinon la crée. "messages: []" dans la réponse veut dire
+  // qu'on n'a encore jamais répondu — sert de dédoublonnage.
+  const debugTrace = []
+  let found = null
+  for (const n of favoriteNotifs) {
+    try {
+      const messagingMatch = n.link.match(/messaging\?item_id=(\d+)&user_id=(\d+)/)
+      const offeringMatch = n.link.match(/offering_id=(\d+)/)
+      const itemId = messagingMatch ? messagingMatch[1] : String(n.subject_id)
+      const oppositeUserId = messagingMatch ? messagingMatch[2] : (offeringMatch ? offeringMatch[1] : null)
+      if (!oppositeUserId) { debugTrace.push({ id: n.id, skip: 'no_user_id_resolved', link: n.link }); continue }
+      const r = await fetch('https://www.vinted.fr/api/v2/conversations', {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-        body: JSON.stringify({ reply: { body: message, photo_temp_uuids: null } }),
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          initiator: 'seller_enters_notification',
+          item_id: itemId,
+          opposite_user_id: oppositeUserId,
+        }),
       })
-      return r.ok
-    },
-    args: [found.conversationId, message],
-  })
+      if (!r.ok) { debugTrace.push({ id: n.id, skip: `HTTP ${r.status}`, body: (await r.text().catch(() => '')).slice(0, 300) }); continue }
+      const data = await r.json()
+      const conv = data.conversation
+      if (!conv) { debugTrace.push({ id: n.id, skip: 'no_conversation_in_response' }); continue }
+      if ((conv.messages || []).length > 0) { debugTrace.push({ id: n.id, skip: 'already_has_messages' }); continue }
+      const nameMatch = (n.body || '').match(/^(.+?)\s+a marqué/)
+      found = {
+        conversationId: String(conv.id),
+        notifId: String(n.id),
+        name: conv.opposite_user?.login || (nameMatch ? nameMatch[1] : ''),
+      }
+      break
+    } catch (e) {
+      debugTrace.push({ id: n.id, skip: 'exception', error: e.message })
+    }
+  }
 
-  if (sendResult?.[0]?.result) {
+  if (!found?.conversationId) return { ok: false, error: 'no_eligible_favorite_found', debug: { debugTrace, favoriteNotifCount: favoriteNotifs.length, notificationsCount: notifications.length, sampleLinks: notifications.slice(0, 3).map(n => n.link) } }
+
+  const message = (config.template || '').replace(/\{item\}/g, found.name || 'cet article')
+  if (!message.trim()) return { ok: false, error: 'empty_template', found }
+
+  let sent
+  try {
+    const r = await fetch(`https://www.vinted.fr/api/v2/conversations/${found.conversationId}/replies`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reply: { body: message, photo_temp_uuids: null } }),
+    })
+    sent = r.ok ? { ok: true } : { ok: false, error: `HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 300)}` }
+  } catch (e) {
+    sent = { ok: false, error: e.message }
+  }
+  if (sent?.ok) {
     await backendFetch('POST', '/api/extension/mark-messaged', {
       id: found.notifId,
       recipient_login: found.name,
       message,
     })
   }
+  return { ok: !!sent?.ok, error: sent?.error, recipient: found.name, conversationId: found.conversationId }
 }
 
 // ── Republication automatique (delete + recreate honnête, sans retouche) ──

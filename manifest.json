@@ -6,6 +6,7 @@
   "permissions": ["storage", "alarms", "tabs", "scripting", "notifications"],
   "host_permissions": [
     "https://www.vinted.fr/*",
+    "https://api.vinted.fr/*",
     "https://web-production-662dc1.up.railway.app/*"
   ],
   "background": {
