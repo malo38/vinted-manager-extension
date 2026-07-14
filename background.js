@@ -361,7 +361,11 @@ async function getVintedAuthTokens(tabId) {
 }
 
 async function runAutoMessageFavoris() {
-  const config = await backendFetch('GET', '/api/extension/automessage-config')
+  // Réglages désormais PAR COMPTE Vinted : on ne lit que celui actuellement
+  // connecté dans le navigateur, identifié via le dernier sync réussi
+  // (toujours frais puisque cette fonction ne tourne que juste après).
+  const { vm_vinted_user_id } = await chrome.storage.local.get(['vm_vinted_user_id'])
+  const config = await backendFetch('GET', `/api/extension/automessage-config?vinted_user_id=${encodeURIComponent(vm_vinted_user_id || '')}`)
   if (!config?.enabled) return { ok: false, error: 'disabled', config }
   if (config.sent_today >= config.daily_limit) return { ok: false, error: 'daily_limit_reached', config }
 
@@ -484,6 +488,7 @@ async function runAutoMessageFavoris() {
       id: found.notifId,
       recipient_login: found.name,
       message,
+      vinted_user_id: vm_vinted_user_id || '',
     })
   }
   return { ok: !!sent?.ok, error: sent?.error, recipient: found.name, conversationId: found.conversationId }
@@ -495,19 +500,22 @@ async function runAutoMessageFavoris() {
 // supprimer l'ancien" : si la création échoue en cours de route, l'annonce
 // d'origine reste intacte plutôt que de se retrouver supprimée pour rien.
 async function runAutoRepublish() {
-  const config = await backendFetch('GET', '/api/extension/republish-config')
+  // Réglages PAR COMPTE Vinted, comme automessage-config (voir commentaire
+  // équivalent dans runAutoMessageFavoris()).
+  const { vm_vinted_user_id } = await chrome.storage.local.get(['vm_vinted_user_id'])
+  const config = await backendFetch('GET', `/api/extension/republish-config?vinted_user_id=${encodeURIComponent(vm_vinted_user_id || '')}`)
   if (!config?.enabled) return
   if (config.republished_today >= config.daily_limit) return
   const targetItemId = (config.eligible_vinted_item_ids || [])[0]
   if (!targetItemId) return
 
-  await republishItemById(targetItemId)
+  await republishItemById(targetItemId, vm_vinted_user_id)
 }
 
 // Coeur de la republication, isolé de runAutoRepublish() pour pouvoir cibler
 // un article précis plutôt que dépendre de la sélection automatique
 // "premier éligible".
-async function republishItemById(targetItemId) {
+async function republishItemById(targetItemId, vintedUserId) {
   const tab = await getVintedTab()
   if (!tab) return { ok: false, error: 'no_vinted_tab' }
 
@@ -666,6 +674,7 @@ async function republishItemById(targetItemId) {
   await backendFetch('POST', '/api/extension/mark-republished', {
     old_vinted_item_id: String(targetItemId),
     new_vinted_item_id: String(result.newItemId),
+    vinted_user_id: vintedUserId || '',
   })
   return result
 }
@@ -696,7 +705,7 @@ async function syncVinted() {
       chrome.action.setBadgeBackgroundColor({ color: '#ef4444' })
       return { ok: false, reason: 'backend_unreachable' }
     }
-    await setConfig({ vm_last_sync: new Date().toISOString(), vm_vinted_login: data.user.login })
+    await setConfig({ vm_last_sync: new Date().toISOString(), vm_vinted_login: data.user.login, vm_vinted_user_id: data.user.id })
     notifyNewMessages(data.messages).catch(() => {})
     chrome.action.setBadgeText({ text: '✓' })
     chrome.action.setBadgeBackgroundColor({ color: '#00e5a0' })
