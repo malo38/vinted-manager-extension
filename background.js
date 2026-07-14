@@ -451,8 +451,16 @@ async function runAutoRepublish() {
   const targetItemId = (config.eligible_vinted_item_ids || [])[0]
   if (!targetItemId) return
 
+  await republishItemById(targetItemId)
+}
+
+// Coeur de la republication, isolé pour pouvoir être testé manuellement sur
+// UN article précis (voir self.debugRepublishItem plus bas) sans dépendre de
+// la sélection automatique "premier éligible" — plus sûr pour un premier test
+// réel, sur un article choisi plutôt que subi.
+async function republishItemById(targetItemId) {
   const tab = await getVintedTab()
-  if (!tab) return
+  if (!tab) return { ok: false, error: 'no_vinted_tab' }
 
   const results = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -561,12 +569,13 @@ async function runAutoRepublish() {
   })
 
   const result = results?.[0]?.result
-  if (!result?.ok) return
+  if (!result?.ok) return result
 
   await backendFetch('POST', '/api/extension/mark-republished', {
     old_vinted_item_id: String(targetItemId),
     new_vinted_item_id: String(result.newItemId),
   })
+  return result
 }
 
 // ── Sync principale ──
@@ -654,3 +663,14 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create('sync', { periodInMinutes: SYNC_INTERVAL_MIN })
   chrome.alarms.create('refresh_token', { periodInMinutes: 45 })
 })
+
+// ── Aides de test manuel (console du service worker) ──
+// background.js est un module ES ("type": "module" dans le manifest), donc
+// ses fonctions top-level ne sont pas accessibles directement depuis la
+// console DevTools — on les expose explicitement sur self pour pouvoir
+// tester une seule fois, sur un article précis, avant de compter sur
+// l'automatisation. Voir chrome://extensions → "service worker" → Console :
+//   debugRepublishItem('1234567890')   // remplacez par l'id Vinted réel
+//   debugRunAutoMessageFavoris()
+self.debugRepublishItem = republishItemById
+self.debugRunAutoMessageFavoris = runAutoMessageFavoris
