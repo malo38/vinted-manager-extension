@@ -465,24 +465,60 @@ async function republishItemById(targetItemId) {
   const results = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: async (itemId) => {
+      // Le CSRF n'est pas dans une balise <meta> mais embarqué dans le HTML de
+      // la page sous la forme "CSRF_TOKEN":"..." — l'anon-id vient du cookie
+      // du même nom. Les deux sont exigés par les endpoints d'édition/écriture
+      // (item_upload/*), pas par les endpoints de lecture publique.
+      function extractCsrf(html) {
+        // Le token apparaît parfois entre guillemets simples ("CSRF_TOKEN":"...")
+        // et parfois échappés dans un payload Next.js (\"CSRF_TOKEN\":\"...\") —
+        // on ignore les antislashs autour des guillemets plutôt que de matcher
+        // un format précis.
+        const m = html.match(/CSRF_TOKEN\\*"\s*:\s*\\*"([a-f0-9-]{20,})/i)
+        return m ? m[1] : null
+      }
+      async function getCsrfToken() {
+        const fromDom = extractCsrf(document.documentElement.innerHTML)
+        if (fromDom) return fromDom
+        // Le token n'est pas toujours injecté sur la page courante (ex: page
+        // d'accueil du compte) — /items/new (formulaire de vente) l'a toujours.
+        const r = await fetch('https://www.vinted.fr/items/new', { credentials: 'include' })
+        return extractCsrf(await r.text())
+      }
+      function getAnonId() {
+        const m = document.cookie.match(/(?:^|;\s*)anon_id=([^;]+)/)
+        return m ? decodeURIComponent(m[1]) : null
+      }
+
+      const csrf = await getCsrfToken()
+      const anonId = getAnonId()
+      const authHeaders = {
+        Accept: 'application/json, text/plain, */*',
+        'X-Requested-With': 'XMLHttpRequest',
+        'x-enable-multiple-size-groups': 'true',
+        ...(csrf ? { 'x-csrf-token': csrf } : {}),
+        ...(anonId ? { 'x-anon-id': anonId } : {}),
+      }
+
       async function apiGet(path) {
         const r = await fetch(`https://www.vinted.fr/api/v2${path}`, {
           credentials: 'include',
-          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          headers: authHeaders,
         })
         if (!r.ok) throw new Error(`GET ${path} -> HTTP ${r.status}`)
         return r.json()
       }
 
       try {
-        // 1. Détails complets de l'annonce actuelle (champs confirmés via une
-        // vraie réponse GET /items/{id} référencée par un projet tiers open
-        // source — pas encore revérifiés sur un vrai compte VintControl : à
-        // confirmer lors du premier test réel).
-        const detail = await apiGet(`/items/${itemId}`)
+        if (!csrf) throw new Error('no_csrf_token')
+
+        // 1. Détails complets de l'annonce actuelle. L'endpoint public
+        // /items/{id} ne suffit pas (403/404 sans contexte d'édition) : il
+        // faut l'endpoint utilisé par le formulaire d'édition lui-même.
+        const detail = await apiGet(`/item_upload/items/${itemId}`)
         const item = detail.item || detail
 
-        let colors = Array.isArray(item.colors) ? [...item.colors] : []
+        let colors = Array.isArray(item.color_ids) ? [...item.color_ids] : (Array.isArray(item.colors) ? [...item.colors] : [])
         for (let i = 0; i < 20; i++) {
           const key = `color${i}_id`
           if (item[key] != null) colors.push(item[key])
@@ -493,7 +529,7 @@ async function republishItemById(targetItemId) {
         const tempUuid = crypto.randomUUID()
         const photoIds = []
         for (const photo of (item.photos || [])) {
-          const url = typeof photo === 'string' ? photo : photo.url
+          const url = typeof photo === 'string' ? photo : (photo.full_size_url || photo.url)
           if (!url) continue
           const blob = await (await fetch(url)).blob()
           const form = new FormData()
@@ -503,7 +539,7 @@ async function republishItemById(targetItemId) {
           const uploadRes = await fetch('https://www.vinted.fr/api/v2/photos', {
             method: 'POST',
             credentials: 'include',
-            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            headers: authHeaders,
             body: form,
           })
           if (!uploadRes.ok) throw new Error(`photo upload -> HTTP ${uploadRes.status}`)
@@ -515,34 +551,41 @@ async function republishItemById(targetItemId) {
         // 3. Créer la nouvelle annonce, à l'identique (même titre, description,
         // marque, taille, catégorie, couleurs, état, prix), avant de toucher
         // à l'ancienne.
-        const createRes = await fetch('https://www.vinted.fr/api/v2/items', {
+        const createRes = await fetch('https://www.vinted.fr/api/v2/item_upload/items', {
           method: 'POST',
           credentials: 'include',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          headers: { ...authHeaders, 'Content-Type': 'application/json', 'x-upload-form': 'true' },
           body: JSON.stringify({
             item: {
               id: null,
-              currency: item.currency || 'EUR',
+              currency: item.price?.currency_code || item.currency || 'EUR',
               temp_uuid: tempUuid,
               title: item.title,
               description: item.description,
-              brand: item.brand,
+              brand: item.brand_title || item.brand,
+              brand_id: item.brand_id ?? null,
               size_id: item.size_id,
               catalog_id: item.catalog_id,
               status_id: item.status_id,
               package_size_id: item.package_size_id,
               is_unisex: item.is_unisex ?? false,
-              price: item.original_price_numeric ?? item.price,
+              price: parseFloat(item.price?.amount ?? item.price_numeric ?? item.original_price_numeric ?? item.price) || 0,
               color_ids: colors,
               assigned_photos: photoIds.map(id => ({ id, orientation: 0 })),
               measurement_length: item.measurement_length ?? null,
               measurement_width: item.measurement_width ?? null,
-              item_attributes: [{ code: 'material', ids: [] }],
+              item_attributes: item.item_attributes || [],
             },
             feedback_id: null,
+            push_up: false,
+            parcel: null,
+            upload_session_id: tempUuid,
           }),
         })
-        if (!createRes.ok) throw new Error(`create item -> HTTP ${createRes.status}`)
+        if (!createRes.ok) {
+          const body = await createRes.text().catch(() => '')
+          throw new Error(`create item -> HTTP ${createRes.status}: ${body.slice(0, 500)}`)
+        }
         const createData = await createRes.json()
         const newItemId = createData.item?.id ?? createData.id
         if (!newItemId) throw new Error('no_new_item_id')
@@ -551,7 +594,7 @@ async function republishItemById(targetItemId) {
         const deleteRes = await fetch(`https://www.vinted.fr/api/v2/items/${itemId}/delete`, {
           method: 'POST',
           credentials: 'include',
-          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          headers: authHeaders,
         })
         if (!deleteRes.ok) {
           // La nouvelle annonce existe mais l'ancienne aussi encore : pas
