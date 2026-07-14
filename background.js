@@ -1,9 +1,9 @@
 /**
- * Vinted Manager — Service Worker (background)
+ * VintControl — Service Worker (background)
  * --------------------------------------------
  * Tourne en arrière-plan dans Chrome.
  * Toutes les 5 minutes : lit les données Vinted depuis un onglet ouvert
- * et les envoie au backend Vinted Manager.
+ * et les envoie au backend VintControl.
  */
 
 const DEFAULT_BACKEND = 'https://web-production-662dc1.up.railway.app'
@@ -504,10 +504,9 @@ async function runAutoRepublish() {
   await republishItemById(targetItemId)
 }
 
-// Coeur de la republication, isolé pour pouvoir être testé manuellement sur
-// UN article précis (voir self.debugRepublishItem plus bas) sans dépendre de
-// la sélection automatique "premier éligible" — plus sûr pour un premier test
-// réel, sur un article choisi plutôt que subi.
+// Coeur de la republication, isolé de runAutoRepublish() pour pouvoir cibler
+// un article précis plutôt que dépendre de la sélection automatique
+// "premier éligible".
 async function republishItemById(targetItemId) {
   const tab = await getVintedTab()
   if (!tab) return { ok: false, error: 'no_vinted_tab' }
@@ -756,14 +755,3 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create('sync', { periodInMinutes: SYNC_INTERVAL_MIN })
   chrome.alarms.create('refresh_token', { periodInMinutes: 45 })
 })
-
-// ── Aides de test manuel (console du service worker) ──
-// background.js est un module ES ("type": "module" dans le manifest), donc
-// ses fonctions top-level ne sont pas accessibles directement depuis la
-// console DevTools — on les expose explicitement sur self pour pouvoir
-// tester une seule fois, sur un article précis, avant de compter sur
-// l'automatisation. Voir chrome://extensions → "service worker" → Console :
-//   debugRepublishItem('1234567890')   // remplacez par l'id Vinted réel
-//   debugRunAutoMessageFavoris()
-self.debugRepublishItem = republishItemById
-self.debugRunAutoMessageFavoris = runAutoMessageFavoris
