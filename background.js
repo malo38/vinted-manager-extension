@@ -113,9 +113,25 @@ async function fetchVintedData() {
           item_count: user.item_count ?? user.given_item_count ?? 0,
         }
 
+        // /my_orders per_page=100/page=1 seul ratait toute vente au-delà des 100
+        // plus récentes (article resté coincé en "stock" pour toujours, signalé
+        // le 2026-07-15) — on pagine désormais jusqu'à 5 pages (500 commandes),
+        // même heuristique d'arrêt que les autres endpoints paginés de ce
+        // fichier (page renvoyée plus courte que per_page = dernière page).
+        async function fetchAllOrders(orderType) {
+          let all = []
+          for (let page = 1; page <= 5; page++) {
+            const data = await apiGet('/my_orders', { per_page: '100', page: String(page), order_type: orderType })
+            const batch = data.my_orders || []
+            all.push(...batch)
+            if (batch.length < 100) break
+          }
+          return { my_orders: all }
+        }
+
         const [ordersRaw, purchasesRaw, wardrobeRaw, inboxRaw, walletRaw] = await Promise.all([
-          apiGet('/my_orders', { per_page: '100', page: '1', order_type: 'sold' }),
-          apiGet('/my_orders', { per_page: '100', page: '1', order_type: 'purchased' }).catch(() => ({ my_orders: [] })),
+          fetchAllOrders('sold'),
+          fetchAllOrders('purchased').catch(() => ({ my_orders: [] })),
           apiGet(`/wardrobe/${userId}/items`, { per_page: '100', order: 'newest_first' }),
           apiGet('/inbox', { per_page: '50' }).catch(() => ({ conversations: [] })),
           // Solde du porte-monnaie : confirmé via /wallet/invoices/current le 2026-07-04
