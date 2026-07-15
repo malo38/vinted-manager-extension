@@ -177,14 +177,23 @@ async function fetchVintedData() {
         ;(purchasesRaw.my_orders || []).forEach(o => addOrder(o, false, true))
         const orderEntries = Array.from(orderEntriesMap.values())
 
-        const annonces = (wardrobeRaw.items || []).map(i => ({
-          id: String(i.id),
-          titre: i.title || '',
-          prix: parseFloat(i.price?.amount ?? i.price_numeric ?? 0),
-          vues: i.view_count || 0,
-          favoris: i.favourite_count || 0,
-          photo: i.photo?.url || i.photos?.[0]?.url || '',
-        }));
+        // /wardrobe/{userId}/items renvoie aussi les annonces fermées/vendues
+        // (parfois marquées "vendu" manuellement par le vendeur sans passer par
+        // une vraie transaction Vinted, donc invisibles dans /my_orders) — le
+        // champ is_closed le signale explicitement. Sans ce filtre, un article
+        // fermé revenait indéfiniment marqué "stock" à chaque synchro (trouvé
+        // le 2026-07-15 : is_closed:true sur un article qui ne réapparaissait
+        // jamais dans les vraies ventes).
+        const annonces = (wardrobeRaw.items || [])
+          .filter(i => !i.is_closed)
+          .map(i => ({
+            id: String(i.id),
+            titre: i.title || '',
+            prix: parseFloat(i.price?.amount ?? i.price_numeric ?? 0),
+            vues: i.view_count || 0,
+            favoris: i.favourite_count || 0,
+            photo: i.photo?.url || i.photos?.[0]?.url || '',
+          }));
 
         // Vinted génère toujours ce même gabarit de texte pour une offre en attente
         // (confirmé via /inbox le 2026-07-03) : "Bonjour, accepterais-tu de me vendre
