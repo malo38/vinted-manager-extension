@@ -543,7 +543,19 @@ async function runAutoRepublish() {
   // équivalent dans runAutoMessageFavoris()).
   const { vm_vinted_user_id } = await chrome.storage.local.get(['vm_vinted_user_id'])
   const config = await backendFetch('GET', `/api/extension/republish-config?vinted_user_id=${encodeURIComponent(vm_vinted_user_id || '')}`)
-  if (!config?.enabled) return
+  if (!config) return
+
+  // Clic manuel "Republier maintenant" sur le site : passe devant la file
+  // normale et ignore enabled/daily_limit — c'est une action explicite de
+  // l'utilisateur, pas le cycle automatique. Le backend l'a déjà consommée
+  // (remise à null) dès cette lecture, donc pas de risque de la relancer au
+  // cycle suivant.
+  if (config.priority_vinted_item_id) {
+    await republishItemById(config.priority_vinted_item_id, vm_vinted_user_id)
+    return
+  }
+
+  if (!config.enabled) return
   if (config.republished_today >= config.daily_limit) return
   const targetItemId = (config.eligible_vinted_item_ids || [])[0]
   if (!targetItemId) return
