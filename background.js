@@ -129,10 +129,24 @@ async function fetchVintedData() {
           return { my_orders: all }
         }
 
+        // Vinted a utilisé plusieurs formes d'URL pour lister les annonces d'un
+        // utilisateur au fil du temps. /wardrobe/{userId}/items est celle
+        // vérifiée et utilisée depuis le début, mais si elle venait à changer
+        // un jour, on retente /users/{userId}/items avant d'abandonner —
+        // amortit un futur changement d'API plutôt que de casser net.
+        async function fetchWardrobeItems() {
+          try {
+            return await apiGet(`/wardrobe/${userId}/items`, { per_page: '100', order: 'newest_first' })
+          } catch (e) {
+            const fallback = await apiGet(`/users/${userId}/items`, { per_page: '100' })
+            return fallback
+          }
+        }
+
         const [ordersRaw, purchasesRaw, wardrobeRaw, inboxRaw, walletRaw] = await Promise.all([
           fetchAllOrders('sold'),
           fetchAllOrders('purchased').catch(() => ({ my_orders: [] })),
-          apiGet(`/wardrobe/${userId}/items`, { per_page: '100', order: 'newest_first' }),
+          fetchWardrobeItems(),
           apiGet('/inbox', { per_page: '50' }).catch(() => ({ conversations: [] })),
           // Solde du porte-monnaie : confirmé via /wallet/invoices/current le 2026-07-04
           // (balance.amount / pending_balance.amount).
