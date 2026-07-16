@@ -134,13 +134,28 @@ async function fetchVintedData() {
         // vérifiée et utilisée depuis le début, mais si elle venait à changer
         // un jour, on retente /users/{userId}/items avant d'abandonner —
         // amortit un futur changement d'API plutôt que de casser net.
+        // Pagination complète (via pagination.total_pages, confirmé présent dans
+        // la réponse le 2026-07-16) : un dressing de 100+ annonces actives ne
+        // doit pas se limiter à la 1ère page, sinon la détection des annonces
+        // supprimées sur Vinted (voir backend) les confondrait à tort avec de
+        // vraies suppressions.
         async function fetchWardrobeItems() {
-          try {
-            return await apiGet(`/wardrobe/${userId}/items`, { per_page: '100', order: 'newest_first' })
-          } catch (e) {
-            const fallback = await apiGet(`/users/${userId}/items`, { per_page: '100' })
-            return fallback
+          const path = await (async () => {
+            try {
+              await apiGet(`/wardrobe/${userId}/items`, { per_page: '1', page: '1' })
+              return `/wardrobe/${userId}/items`
+            } catch (e) {
+              return `/users/${userId}/items`
+            }
+          })()
+          const first = await apiGet(path, { per_page: '100', page: '1', order: 'newest_first' })
+          const items = [...(first.items || [])]
+          const totalPages = first.pagination?.total_pages || 1
+          for (let page = 2; page <= totalPages; page++) {
+            const next = await apiGet(path, { per_page: '100', page: String(page), order: 'newest_first' })
+            items.push(...(next.items || []))
           }
+          return { items }
         }
 
         const [ordersRaw, purchasesRaw, wardrobeRaw, inboxRaw, walletRaw] = await Promise.all([
