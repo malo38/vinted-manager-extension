@@ -47,7 +47,10 @@ document.getElementById('btnSync').addEventListener('click', async () => {
   } else if (result?.reason === 'backend_unreachable') {
     btn.textContent = '✗ Connexion expirée — déconnectez-vous et reconnectez-vous';
   } else {
-    btn.textContent = '✗ Erreur — réessayez';
+    // Message générique remplacé par la vraie raison (result.reason) quand
+    // on l'a — sinon impossible à diagnostiquer sans la console du service
+    // worker. Voir aussi le console.error ajouté dans syncVinted().
+    btn.textContent = result?.reason ? `✗ Erreur : ${result.reason}` : '✗ Erreur — réessayez';
   }
   setTimeout(() => { btn.textContent = '🔄 Synchroniser maintenant'; checkStatus(); }, 2500);
 });

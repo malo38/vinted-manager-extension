@@ -546,69 +546,86 @@ async function runAutoMessageFavoris() {
   // désormais). Idempotent : retrouve la conversation existante si elle
   // l'est déjà, sinon la crée. "messages: []" dans la réponse veut dire
   // qu'on n'a encore jamais répondu — sert de dédoublonnage.
-  const debugTrace = []
-  let found = null
-  for (const n of favoriteNotifs) {
+  async function findOneEligible(excludeNotifIds) {
+    const debugTrace = []
+    for (const n of favoriteNotifs) {
+      if (excludeNotifIds.has(String(n.id))) continue
+      try {
+        const messagingMatch = n.link.match(/messaging\?item_id=(\d+)&user_id=(\d+)/)
+        const wantItMatch = n.link.match(/want_it\?receiver_id=(\d+)&item_id=(\d+)/)
+        const offeringMatch = n.link.match(/offering_id=(\d+)/)
+        const itemId = messagingMatch ? messagingMatch[1] : (wantItMatch ? wantItMatch[2] : String(n.subject_id))
+        const oppositeUserId = messagingMatch ? messagingMatch[2] : (wantItMatch ? wantItMatch[1] : (offeringMatch ? offeringMatch[1] : null))
+        if (!oppositeUserId) { debugTrace.push({ id: n.id, skip: 'no_user_id_resolved', link: n.link }); continue }
+        const r = await fetch('https://www.vinted.fr/api/v2/conversations', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { ...authHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            initiator: 'seller_enters_notification',
+            item_id: itemId,
+            opposite_user_id: oppositeUserId,
+          }),
+        })
+        if (!r.ok) { debugTrace.push({ id: n.id, skip: `HTTP ${r.status}`, body: (await r.text().catch(() => '')).slice(0, 300) }); continue }
+        const data = await r.json()
+        const conv = data.conversation
+        if (!conv) { debugTrace.push({ id: n.id, skip: 'no_conversation_in_response' }); continue }
+        if ((conv.messages || []).length > 0) { debugTrace.push({ id: n.id, skip: 'already_has_messages' }); continue }
+        const nameMatch = (n.body || '').match(/^(.+?)\s+a marqué/)
+        return { found: { conversationId: String(conv.id), notifId: String(n.id), name: conv.opposite_user?.login || (nameMatch ? nameMatch[1] : '') }, debugTrace }
+      } catch (e) {
+        debugTrace.push({ id: n.id, skip: 'exception', error: e.message })
+      }
+    }
+    return { found: null, debugTrace }
+  }
+
+  async function sendOne(found) {
+    const message = (config.template || '').replace(/\{item\}/g, found.name || 'cet article')
+    if (!message.trim()) return { ok: false, error: 'empty_template', found }
+    let sent
     try {
-      const messagingMatch = n.link.match(/messaging\?item_id=(\d+)&user_id=(\d+)/)
-      const wantItMatch = n.link.match(/want_it\?receiver_id=(\d+)&item_id=(\d+)/)
-      const offeringMatch = n.link.match(/offering_id=(\d+)/)
-      const itemId = messagingMatch ? messagingMatch[1] : (wantItMatch ? wantItMatch[2] : String(n.subject_id))
-      const oppositeUserId = messagingMatch ? messagingMatch[2] : (wantItMatch ? wantItMatch[1] : (offeringMatch ? offeringMatch[1] : null))
-      if (!oppositeUserId) { debugTrace.push({ id: n.id, skip: 'no_user_id_resolved', link: n.link }); continue }
-      const r = await fetch('https://www.vinted.fr/api/v2/conversations', {
+      const r = await fetch(`https://www.vinted.fr/api/v2/conversations/${found.conversationId}/replies`, {
         method: 'POST',
         credentials: 'include',
         headers: { ...authHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          initiator: 'seller_enters_notification',
-          item_id: itemId,
-          opposite_user_id: oppositeUserId,
-        }),
+        body: JSON.stringify({ reply: { body: message, photo_temp_uuids: null } }),
       })
-      if (!r.ok) { debugTrace.push({ id: n.id, skip: `HTTP ${r.status}`, body: (await r.text().catch(() => '')).slice(0, 300) }); continue }
-      const data = await r.json()
-      const conv = data.conversation
-      if (!conv) { debugTrace.push({ id: n.id, skip: 'no_conversation_in_response' }); continue }
-      if ((conv.messages || []).length > 0) { debugTrace.push({ id: n.id, skip: 'already_has_messages' }); continue }
-      const nameMatch = (n.body || '').match(/^(.+?)\s+a marqué/)
-      found = {
-        conversationId: String(conv.id),
-        notifId: String(n.id),
-        name: conv.opposite_user?.login || (nameMatch ? nameMatch[1] : ''),
-      }
-      break
+      sent = r.ok ? { ok: true } : { ok: false, error: `HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 300)}` }
     } catch (e) {
-      debugTrace.push({ id: n.id, skip: 'exception', error: e.message })
+      sent = { ok: false, error: e.message }
     }
+    if (sent?.ok) {
+      await backendFetch('POST', '/api/extension/mark-messaged', {
+        id: found.notifId,
+        recipient_login: found.name,
+        message,
+        vinted_user_id: vm_vinted_user_id || '',
+      })
+    }
+    return { ok: !!sent?.ok, error: sent?.error, recipient: found.name, conversationId: found.conversationId }
   }
 
-  if (!found?.conversationId) return { ok: false, error: 'no_eligible_favorite_found', debug: { debugTrace, favoriteNotifCount: favoriteNotifs.length, notificationsCount: notifications.length, sampleLinks: notifications.slice(0, 3).map(n => n.link) } }
-
-  const message = (config.template || '').replace(/\{item\}/g, found.name || 'cet article')
-  if (!message.trim()) return { ok: false, error: 'empty_template', found }
-
-  let sent
-  try {
-    const r = await fetch(`https://www.vinted.fr/api/v2/conversations/${found.conversationId}/replies`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { ...authHeaders, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reply: { body: message, photo_temp_uuids: null } }),
-    })
-    sent = r.ok ? { ok: true } : { ok: false, error: `HTTP ${r.status}: ${(await r.text().catch(() => '')).slice(0, 300)}` }
-  } catch (e) {
-    sent = { ok: false, error: e.message }
+  // batch_size (par défaut 1) : combien de messages envoyer dans CE cycle —
+  // au-delà de 1, chaque envoi est espacé d'une pause aléatoire (delay_min/
+  // max_sec configurés) plutôt que d'envoyer une rafale d'un coup.
+  const batchSize = Math.max(1, Math.min(config.batch_size || 1, config.daily_limit - config.sent_today))
+  const excludeNotifIds = new Set()
+  const results = []
+  let lastDebug = null
+  for (let i = 0; i < batchSize; i++) {
+    if (i > 0) await sleep(randomDelayMs(config.delay_min_sec, config.delay_max_sec))
+    const { found, debugTrace } = await findOneEligible(excludeNotifIds)
+    lastDebug = debugTrace
+    if (!found) break
+    excludeNotifIds.add(found.notifId)
+    results.push(await sendOne(found))
   }
-  if (sent?.ok) {
-    await backendFetch('POST', '/api/extension/mark-messaged', {
-      id: found.notifId,
-      recipient_login: found.name,
-      message,
-      vinted_user_id: vm_vinted_user_id || '',
-    })
-  }
-  return { ok: !!sent?.ok, error: sent?.error, recipient: found.name, conversationId: found.conversationId }
+
+  if (!results.length) return { ok: false, error: 'no_eligible_favorite_found', debug: { debugTrace: lastDebug, favoriteNotifCount: favoriteNotifs.length, notificationsCount: notifications.length, sampleLinks: notifications.slice(0, 3).map(n => n.link) } }
+  const lastResult = results[results.length - 1]
+  return { ...lastResult, sentCount: results.filter(r => r.ok).length }
 }
 
 // ── Republication automatique (delete + recreate honnête, sans retouche) ──
@@ -635,10 +652,21 @@ async function runAutoRepublish() {
 
   if (!config.enabled) return
   if (config.republished_today >= config.daily_limit) return
-  const targetItemId = (config.eligible_vinted_item_ids || [])[0]
-  if (!targetItemId) return
+  // batch_size (par défaut 1) : combien d'articles traiter dans CE cycle —
+  // au-delà de 1, on espace chaque republication d'une pause aléatoire
+  // (comme pour les messages favoris) plutôt que de tout faire d'un coup.
+  const batchSize = Math.max(1, config.batch_size || 1)
+  const targets = (config.eligible_vinted_item_ids || []).slice(0, Math.min(batchSize, config.daily_limit - config.republished_today))
+  for (let i = 0; i < targets.length; i++) {
+    if (i > 0) await sleep(randomDelayMs(config.delay_min_sec, config.delay_max_sec))
+    await republishItemById(targets[i], vm_vinted_user_id)
+  }
+}
 
-  await republishItemById(targetItemId, vm_vinted_user_id)
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+function randomDelayMs(minSec, maxSec) {
+  const min = Math.max(5, minSec || 30), max = Math.max(min, maxSec || 90)
+  return (min + Math.random() * (max - min)) * 1000
 }
 
 // Coeur de la republication, isolé de runAutoRepublish() pour pouvoir cibler
