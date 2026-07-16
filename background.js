@@ -207,6 +207,10 @@ async function fetchVintedData() {
             vues: i.view_count || 0,
             favoris: i.favourite_count || 0,
             photo: i.photo?.url || i.photos?.[0]?.url || '',
+            // "promoted" (renvoyé par /wardrobe/{id}/items) reflète le Boost payant
+            // en cours (voir bouton "Booster" sur la fiche article), pas la
+            // republication gratuite — juste affiché, jamais acheté automatiquement.
+            boost: !!i.promoted,
           }));
 
         // Vinted génère toujours ce même gabarit de texte pour une offre en attente

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VintControl",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Synchronise automatiquement votre compte Vinted avec VintControl",
   "permissions": ["storage", "alarms", "tabs", "scripting", "notifications"],
   "host_permissions": [
