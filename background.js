@@ -286,7 +286,10 @@ async function enrichPickupInfo(tabId, achats) {
           // récupéré), on veut le dernier état connu.
           const pickupMsgs = msgs.filter(m => /point relais|bureau de poste|point de retrait/i.test(m.entity?.subtitle || ''))
           const last = pickupMsgs[pickupMsgs.length - 1]
-          if (last) { entry.location = last.entity.subtitle; entry.since = (last.created_at || '').slice(0, 10) }
+          // Le champ s'appelle created_at_ts (malgré son nom, c'est une date
+          // ISO, pas un timestamp epoch) — created_at seul n'existe pas sur
+          // cette réponse, vérifié le 2026-07-16 (donnait toujours null).
+          if (last) { entry.location = last.entity.subtitle; entry.since = (last.created_at_ts || last.created_at || '').slice(0, 10) }
         } catch {}
         try {
           const journey = await apiGet(`/transactions/${transactionId}/shipment/journey_summary`)
