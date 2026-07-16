@@ -527,13 +527,16 @@ async function runAutoMessageFavoris() {
   } catch (e) {
     return { ok: false, error: 'notifications_fetch_failed', message: e.message }
   }
-  // Deux formats de lien observés le même jour (2026-07-14) pour une même
-  // notification de favori : "/items/{id}/want_it/new?offering_id=X" (juste
-  // après le like) et "vintedfr://messaging?item_id=X&user_id=Y" (une fois
-  // affichée dans la liste). On accepte les deux — le second est plus direct
-  // (item_id + user_id explicites, plus besoin de deviner via subject_id).
+  // TROIS formats de lien vus à ce jour pour une même notification de favori
+  // — Vinted change ça régulièrement, chaque nouveau format cassait la
+  // détection en silence (aucune erreur, juste 0 favori jamais trouvé) :
+  // "/items/{id}/want_it/new?offering_id=X" (2026-07-14, juste après le like),
+  // "vintedfr://messaging?item_id=X&user_id=Y" (2026-07-14, une fois affichée
+  // dans la liste), et "/inbox/want_it?receiver_id=X&item_id=Y" (2026-07-16,
+  // receiver_id = la personne qui a liké, donc l'équivalent de user_id/
+  // offering_id ci-dessus). On accepte les trois.
   const favoriteNotifs = notifications.filter(n =>
-    n.link && (n.link.includes('?offering_id=') || /messaging\?item_id=\d+&user_id=\d+/.test(n.link))
+    n.link && (n.link.includes('?offering_id=') || /messaging\?item_id=\d+&user_id=\d+/.test(n.link) || /want_it\?receiver_id=\d+&item_id=\d+/.test(n.link))
   )
 
   // Résoudre chaque favori en vraie conversation via le même appel que fait
@@ -548,9 +551,10 @@ async function runAutoMessageFavoris() {
   for (const n of favoriteNotifs) {
     try {
       const messagingMatch = n.link.match(/messaging\?item_id=(\d+)&user_id=(\d+)/)
+      const wantItMatch = n.link.match(/want_it\?receiver_id=(\d+)&item_id=(\d+)/)
       const offeringMatch = n.link.match(/offering_id=(\d+)/)
-      const itemId = messagingMatch ? messagingMatch[1] : String(n.subject_id)
-      const oppositeUserId = messagingMatch ? messagingMatch[2] : (offeringMatch ? offeringMatch[1] : null)
+      const itemId = messagingMatch ? messagingMatch[1] : (wantItMatch ? wantItMatch[2] : String(n.subject_id))
+      const oppositeUserId = messagingMatch ? messagingMatch[2] : (wantItMatch ? wantItMatch[1] : (offeringMatch ? offeringMatch[1] : null))
       if (!oppositeUserId) { debugTrace.push({ id: n.id, skip: 'no_user_id_resolved', link: n.link }); continue }
       const r = await fetch('https://www.vinted.fr/api/v2/conversations', {
         method: 'POST',
