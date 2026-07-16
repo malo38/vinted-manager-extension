@@ -247,11 +247,15 @@ async function fetchVintedData() {
   return result.data
 }
 
-// ── Adresse du point relais pour un achat en attente de retrait ──
-// Vinted ne donne nulle part de date limite de retrait (ni dans l'app, ni
-// dans l'API — c'est le transporteur qui gère ce délai en interne), mais le
-// nom + l'adresse du point relais sont bien présents, dans le message système
-// de la conversation liée ("Ton colis a été livré dans le Point Relais X...").
+// ── Adresse du point relais + transporteur pour un achat en attente de retrait ──
+// Vinted ne donne nulle part de date limite de retrait, même dans le détail
+// de suivi le plus complet (/shipment/journey_summary → estimated_detail
+// vaut toujours null, vérifié le 2026-07-16) — c'est le transporteur qui
+// gère ce délai en interne, pas Vinted. On récupère en revanche : le nom +
+// l'adresse du point relais (message système de la conversation) et le code
+// transporteur exact (ex: "CHRONOPOST"), qui sert côté site à calculer une
+// ESTIMATION du délai de retrait à partir des durées habituelles connues par
+// transporteur — affichée comme telle, jamais comme une vraie échéance.
 // Pas de cache ici (contrairement à resolveOrderSides) : un achat "en attente"
 // doit être revérifié à chaque sync tant qu'il n'est pas récupéré, alors que
 // le côté achat/vente d'une conversation ne change lui jamais.
@@ -262,7 +266,7 @@ async function enrichPickupInfo(tabId, achats) {
 
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    func: async (ids) => {
+    func: async (items) => {
       async function apiGet(path) {
         const r = await fetch(`https://www.vinted.fr/api/v2${path}`, {
           credentials: 'include',
@@ -272,28 +276,32 @@ async function enrichPickupInfo(tabId, achats) {
         return r.json()
       }
       const out = {}
-      for (const id of ids) {
+      for (const { conversationId, transactionId } of items) {
+        const entry = { location: null, since: null, carrierCode: null }
         try {
-          const detail = await apiGet(`/conversations/${id}`)
+          const detail = await apiGet(`/conversations/${conversationId}`)
           const msgs = detail.messages || detail.conversation?.messages || []
           // Le message le plus récent mentionnant un point relais/bureau de
           // poste dans son sous-titre — s'il y en a plusieurs (livré, puis
           // récupéré), on veut le dernier état connu.
           const pickupMsgs = msgs.filter(m => /point relais|bureau de poste|point de retrait/i.test(m.entity?.subtitle || ''))
           const last = pickupMsgs[pickupMsgs.length - 1]
-          out[id] = last ? { location: last.entity.subtitle, since: (last.created_at || '').slice(0, 10) } : null
-        } catch {
-          out[id] = null
-        }
+          if (last) { entry.location = last.entity.subtitle; entry.since = (last.created_at || '').slice(0, 10) }
+        } catch {}
+        try {
+          const journey = await apiGet(`/transactions/${transactionId}/shipment/journey_summary`)
+          entry.carrierCode = journey.journey_summary?.current_carrier?.code || null
+        } catch {}
+        out[conversationId] = entry
       }
       return out
     },
-    args: [toCheck.map(a => a.conversation_id)],
+    args: [toCheck.map(a => ({ conversationId: a.conversation_id, transactionId: a.id }))],
   }).then(r => r?.[0]?.result || {}).catch(() => ({}))
 
   for (const a of toCheck) {
     const info = results[a.conversation_id]
-    if (info) { a.pickup_location = info.location; a.pickup_since = info.since }
+    if (info) { a.pickup_location = info.location; a.pickup_since = info.since; a.pickup_carrier = info.carrierCode }
   }
 }
 
