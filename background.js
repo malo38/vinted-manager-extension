@@ -232,7 +232,12 @@ async function fetchVintedData() {
           };
         });
 
-        return { ok: true, data: { user: { id: String(userId), login: user.login || '' }, reputation, wallet, orderEntries, annonces, messages } }
+        // wardrobe_total (avant filtrage is_closed) permet au backend de savoir si
+        // cette page de 100 couvrait tout le dressing ou non — sans ça, un vendeur
+        // avec 100+ annonces actives verrait ses annonces au-delà de la page 1
+        // faussement détectées comme "supprimées sur Vinted" (voir reconciliation
+        // des suppressions côté backend).
+        return { ok: true, data: { user: { id: String(userId), login: user.login || '' }, reputation, wallet, orderEntries, annonces, wardrobe_total: (wardrobeRaw.items || []).length, messages } }
       } catch (e) {
         return { ok: false, error: e.message }
       }
@@ -855,6 +860,7 @@ async function syncVinted() {
       ventes: data.ventes,
       achats: data.achats,
       annonces: data.annonces,
+      wardrobe_total: data.wardrobe_total || 0,
       messages: data.messages,
     }
     const syncResult = await backendFetch('POST', '/api/extension/sync', payload)
