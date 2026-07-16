@@ -909,6 +909,32 @@ async function syncVinted() {
   }
 }
 
+// ── Badge persistant sur l'icône (pas juste un flash après sync) ──
+// Reflète en continu l'état réel : gris = déconnecté de VintControl, orange =
+// connecté mais aucun onglet vinted.fr ouvert (la sync auto ne peut pas
+// tourner), vert = tout est prêt. Mis à jour à chaque changement d'onglet
+// plutôt qu'une seule fois au démarrage, pour rester juste en permanence.
+async function updateStatusBadge() {
+  const { vm_token } = await chrome.storage.local.get(['vm_token'])
+  if (!vm_token) {
+    chrome.action.setBadgeText({ text: ' ' })
+    chrome.action.setBadgeBackgroundColor({ color: '#6b7280' })
+    return
+  }
+  const vintedTab = await getVintedTab()
+  if (vintedTab) {
+    chrome.action.setBadgeText({ text: ' ' })
+    chrome.action.setBadgeBackgroundColor({ color: '#00e5a0' })
+  } else {
+    chrome.action.setBadgeText({ text: ' ' })
+    chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' })
+  }
+}
+chrome.tabs.onActivated.addListener(() => updateStatusBadge().catch(() => {}))
+chrome.tabs.onUpdated.addListener((_id, info) => { if (info.status === 'complete') updateStatusBadge().catch(() => {}) })
+chrome.tabs.onRemoved.addListener(() => updateStatusBadge().catch(() => {}))
+chrome.storage.onChanged.addListener(changes => { if (changes.vm_token) updateStatusBadge().catch(() => {}) })
+
 // ── Alarmes ──
 chrome.alarms.create('sync', { periodInMinutes: SYNC_INTERVAL_MIN })
 chrome.alarms.create('refresh_token', { periodInMinutes: 45 })
@@ -942,13 +968,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
   }
   if (msg.action === 'logout') {
     chrome.storage.local.clear()
-    chrome.action.setBadgeText({ text: '' })
     respond({ ok: true })
     return true
   }
 })
 
 chrome.runtime.onStartup.addListener(syncVinted)
+chrome.runtime.onStartup.addListener(() => updateStatusBadge().catch(() => {}))
+chrome.runtime.onInstalled.addListener(() => updateStatusBadge().catch(() => {}))
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create('sync', { periodInMinutes: SYNC_INTERVAL_MIN })
   chrome.alarms.create('refresh_token', { periodInMinutes: 45 })

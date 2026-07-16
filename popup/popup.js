@@ -2,6 +2,22 @@ const SUPABASE_URL = 'https://iprrnmrndjfdlozxjbsu.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlwcnJubXJuZGpmZGxvenhqYnN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI0NjUxOTksImV4cCI6MjA5ODA0MTE5OX0.JAteIwydCEoOe6S3z-Isq6-TwRLBdGpU8akn_1FvQb0';
 const BACKEND = 'https://web-production-662dc1.up.railway.app';
 
+// Détecte en direct si un onglet vinted.fr est ouvert (nécessaire pour que la
+// sync automatique tourne) — affiché en haut du popup pour que ce soit visible
+// avant même de dérouler le reste (signalé comme peu clair le 2026-07-16).
+async function checkVintedTab() {
+  const tabs = await chrome.tabs.query({ url: 'https://www.vinted.fr/*' });
+  const banner = document.getElementById('vintedBanner');
+  const text = document.getElementById('vintedBannerText');
+  if (tabs.length) {
+    banner.className = 'vinted-banner on';
+    text.textContent = 'Vinted détecté sur un onglet ouvert';
+  } else {
+    banner.className = 'vinted-banner off';
+    text.textContent = 'Ouvrez un onglet vinted.fr pour synchroniser';
+  }
+}
+
 async function checkStatus() {
   const status = await chrome.storage.local.get(['vm_token', 'vm_vinted_login', 'vm_last_sync']);
   if (status?.vm_token) {
@@ -61,3 +77,4 @@ document.getElementById('btnLogout').addEventListener('click', async () => {
 });
 
 checkStatus();
+checkVintedTab();
