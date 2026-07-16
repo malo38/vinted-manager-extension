@@ -240,10 +240,61 @@ async function fetchVintedData() {
 
   await enrichMessagesWithArticleTitle(tab.id, result.data.messages)
   const { ventes, achats } = await resolveOrderSides(tab.id, result.data.orderEntries)
+  await enrichPickupInfo(tab.id, achats)
   result.data.ventes = ventes
   result.data.achats = achats
   delete result.data.orderEntries
   return result.data
+}
+
+// ── Adresse du point relais pour un achat en attente de retrait ──
+// Vinted ne donne nulle part de date limite de retrait (ni dans l'app, ni
+// dans l'API — c'est le transporteur qui gère ce délai en interne), mais le
+// nom + l'adresse du point relais sont bien présents, dans le message système
+// de la conversation liée ("Ton colis a été livré dans le Point Relais X...").
+// Pas de cache ici (contrairement à resolveOrderSides) : un achat "en attente"
+// doit être revérifié à chaque sync tant qu'il n'est pas récupéré, alors que
+// le côté achat/vente d'une conversation ne change lui jamais.
+const PICKUP_REGEX = /point relais|bureau de poste|point de retrait/i
+async function enrichPickupInfo(tabId, achats) {
+  const toCheck = achats.filter(a => PICKUP_REGEX.test(a.statut || '') && a.conversation_id).slice(0, 15)
+  if (!toCheck.length) return
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async (ids) => {
+      async function apiGet(path) {
+        const r = await fetch(`https://www.vinted.fr/api/v2${path}`, {
+          credentials: 'include',
+          headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+        })
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      }
+      const out = {}
+      for (const id of ids) {
+        try {
+          const detail = await apiGet(`/conversations/${id}`)
+          const msgs = detail.messages || detail.conversation?.messages || []
+          // Le message le plus récent mentionnant un point relais/bureau de
+          // poste dans son sous-titre — s'il y en a plusieurs (livré, puis
+          // récupéré), on veut le dernier état connu.
+          const pickupMsgs = msgs.filter(m => /point relais|bureau de poste|point de retrait/i.test(m.entity?.subtitle || ''))
+          const last = pickupMsgs[pickupMsgs.length - 1]
+          out[id] = last ? { location: last.entity.subtitle, since: (last.created_at || '').slice(0, 10) } : null
+        } catch {
+          out[id] = null
+        }
+      }
+      return out
+    },
+    args: [toCheck.map(a => a.conversation_id)],
+  }).then(r => r?.[0]?.result || {}).catch(() => ({}))
+
+  for (const a of toCheck) {
+    const info = results[a.conversation_id]
+    if (info) { a.pickup_location = info.location; a.pickup_since = info.since }
+  }
 }
 
 // ── Titre de l'article concerné par chaque conversation ──
@@ -304,10 +355,21 @@ async function enrichMessagesWithArticleTitle(tabId, messages) {
 // par /conversations/{id} (confirmé via un vrai objet le 2026-07-04, sur une vente
 // réelle qui apparaissait à tort dans la liste "purchased"). On le met en cache par
 // conversation car il ne change jamais pour une transaction donnée.
+//
+// Le même appel récupère aussi l'item_id Vinted de l'annonce vendue (tx.item_id,
+// avec repli sur tx.item?.id) — c'est le même identifiant que celui utilisé pour
+// l'annonce quand elle était encore en stock (voir fetchWardrobeItems). Sans ça,
+// la vente était identifiée par l'id de la TRANSACTION (différent de l'id de
+// l'ANNONCE), donc la synchro ne reconnaissait jamais "c'est le même article" et
+// créait une deuxième fiche au lieu de faire passer l'article existant à "vendu"
+// — bug des doublons stock/vendu signalé le 2026-07-15. Une commande "lot" (achat
+// groupé) n'a pas d'item_id unique côté Vinted ; on retombe alors sur l'id de
+// commande, comme avant.
 async function resolveOrderSides(tabId, orderEntries) {
-  const { vm_conv_transaction_side } = await chrome.storage.local.get(['vm_conv_transaction_side'])
-  const cache = vm_conv_transaction_side || {}
-  const toFetch = orderEntries.filter(o => o.conversation_id && !cache[o.conversation_id]).slice(0, 25)
+  const { vm_conv_transaction_side, vm_conv_item_id } = await chrome.storage.local.get(['vm_conv_transaction_side', 'vm_conv_item_id'])
+  const sideCache = vm_conv_transaction_side || {}
+  const itemIdCache = vm_conv_item_id || {}
+  const toFetch = orderEntries.filter(o => o.conversation_id && !sideCache[o.conversation_id]).slice(0, 25)
 
   if (toFetch.length) {
     const results = await chrome.scripting.executeScript({
@@ -326,9 +388,9 @@ async function resolveOrderSides(tabId, orderEntries) {
           try {
             const detail = await apiGet(`/conversations/${id}`)
             const tx = detail.transaction || detail.conversation?.transaction || {}
-            out[id] = tx.current_user_side || ''
+            out[id] = { side: tx.current_user_side || '', itemId: tx.item_id || tx.item?.id || '' }
           } catch {
-            out[id] = ''
+            out[id] = { side: '', itemId: '' }
           }
         }
         return out
@@ -336,20 +398,21 @@ async function resolveOrderSides(tabId, orderEntries) {
       args: [toFetch.map(o => o.conversation_id)],
     }).then(r => r?.[0]?.result || {}).catch(() => ({}))
 
-    for (const [id, side] of Object.entries(results)) {
-      if (side) cache[id] = side
+    for (const [id, { side, itemId }] of Object.entries(results)) {
+      if (side) sideCache[id] = side
+      if (itemId) itemIdCache[id] = String(itemId)
     }
-    await chrome.storage.local.set({ vm_conv_transaction_side: cache })
+    await chrome.storage.local.set({ vm_conv_transaction_side: sideCache, vm_conv_item_id: itemIdCache })
   }
 
   const ventes = []
   const achats = []
   for (const o of orderEntries) {
-    const side = cache[o.conversation_id]
+    const side = sideCache[o.conversation_id]
     // Tant que le côté n'est pas encore résolu (plafonné à 25 nouvelles résolutions
     // par sync), on se rabat sur l'ancienne heuristique le temps que ça se résorbe.
     const isVente = side ? side === 'seller' : (o.seenSold && !o.seenPurchased)
-    const base = { id: o.id, titre: o.titre, prix: o.prix, statut: o.statut, statut_code: o.statut_code, photo: o.photo }
+    const base = { id: o.id, item_id: itemIdCache[o.conversation_id] || '', conversation_id: o.conversation_id, titre: o.titre, prix: o.prix, statut: o.statut, statut_code: o.statut_code, photo: o.photo }
     if (isVente) ventes.push({ ...base, date_vente: o.date })
     else achats.push({ ...base, date_achat: o.date })
   }
@@ -765,6 +828,13 @@ async function syncVinted() {
     if (e.message === 'NO_TAB') {
       return { ok: false, reason: 'no_vinted_tab' }
     }
+    // Le popup n'affichait jusqu'ici qu'un message générique ("✗ Erreur —
+    // réessayez") pour toute erreur non reconnue, sans jamais dire LAQUELLE
+    // — impossible à diagnostiquer sans ouvrir la console du service worker.
+    // On logue le détail ici (visible via chrome://extensions → VintControl
+    // → "service worker") et on renvoie e.message tel quel au popup, qui
+    // l'affiche maintenant directement (voir popup.js) — signalé le 2026-07-15.
+    console.error('[VintControl] Échec de synchro :', e)
     chrome.action.setBadgeText({ text: '!' })
     chrome.action.setBadgeBackgroundColor({ color: '#ef4444' })
     return { ok: false, reason: e.message }
