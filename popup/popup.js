@@ -60,6 +60,8 @@ document.getElementById('btnSync').addEventListener('click', async () => {
     btn.textContent = `✓ ${result.annonces} articles synchronisés`;
   } else if (result?.reason === 'no_vinted_tab') {
     btn.textContent = '⚠️ Ouvrez un onglet vinted.fr';
+  } else if (result?.reason === 'tab_navigated_away') {
+    btn.textContent = '⚠️ Rechargez votre onglet vinted.fr et réessayez';
   } else if (result?.reason === 'backend_unreachable') {
     btn.textContent = '✗ Connexion expirée — déconnectez-vous et reconnectez-vous';
   } else {

@@ -896,6 +896,17 @@ async function syncVinted() {
     if (e.message === 'NO_TAB') {
       return { ok: false, reason: 'no_vinted_tab' }
     }
+    // "Cannot access contents of the page..." : Chrome le renvoie quand
+    // l'onglet trouvé par getVintedTab() a quitté vinted.fr (navigation,
+    // fermeture, mise en veille de l'onglet) entre le moment où on l'a
+    // repéré et l'injection du script — quelques centaines de ms plus tard.
+    // Message générique Chrome bien plus déroutant qu'un simple "rouvrez
+    // l'onglet" pour l'utilisateur (signalé le 2026-07-17).
+    if (/cannot access contents of the page/i.test(e.message || '')) {
+      chrome.action.setBadgeText({ text: '!' })
+      chrome.action.setBadgeBackgroundColor({ color: '#ef4444' })
+      return { ok: false, reason: 'tab_navigated_away' }
+    }
     // Le popup n'affichait jusqu'ici qu'un message générique ("✗ Erreur —
     // réessayez") pour toute erreur non reconnue, sans jamais dire LAQUELLE
     // — impossible à diagnostiquer sans ouvrir la console du service worker.
