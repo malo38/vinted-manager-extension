@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VintControl",
-  "version": "1.4.9",
+  "version": "1.5.0",
   "description": "Synchronise automatiquement votre compte Vinted avec VintControl",
   "permissions": ["storage", "alarms", "tabs", "scripting", "notifications"],
   "host_permissions": [
@@ -13,6 +13,19 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://www.vinted.fr/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/icon48.png"],
+      "matches": ["https://www.vinted.fr/*"]
+    }
+  ],
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
