@@ -72,7 +72,13 @@
       panel.innerHTML = `<div class="brand">VintControl</div><div class="msg">Connecte-toi via l'icône de l'extension dans la barre d'outils.</div>`
       return
     }
-    dotEl.style.background = '#00e5a0'
+    // Orange si la dernière sync date de plus de 15 min (2x l'intervalle
+    // normal de 5 min) — signale que la synchro auto ne tourne probablement
+    // plus (onglet fermé, ordi en veille...) sans attendre que l'utilisateur
+    // s'en rende compte lui-même (demandé le 2026-07-17).
+    const lastSyncDate = status.vm_last_sync ? new Date(status.vm_last_sync) : null
+    const minutesSinceSync = lastSyncDate ? (Date.now() - lastSyncDate.getTime()) / 60000 : null
+    dotEl.style.background = (minutesSinceSync === null || minutesSinceSync > 15) ? '#f59e0b' : '#00e5a0'
     const lastSync = status.vm_last_sync ? new Date(status.vm_last_sync).toLocaleTimeString('fr-FR') : 'Jamais'
     panel.innerHTML = `
       <div class="brand">VintControl</div>
@@ -111,4 +117,8 @@
   })
 
   render()
+  // Le point ne se recalcule sinon qu'à l'ouverture du panneau ou à un
+  // changement de storage — sans ça, il resterait vert indéfiniment même
+  // après 15 min sans sync tant que personne ne rouvre le panneau.
+  setInterval(render, 60 * 1000)
 })()
