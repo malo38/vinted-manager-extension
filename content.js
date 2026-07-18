@@ -11,7 +11,12 @@
 
   const host = document.createElement('div')
   host.id = 'vintcontrol-bubble-host'
-  host.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;'
+  // bottom: 110px (pas 20px) pour ne pas chevaucher la bulle d'autres
+  // extensions ancrées dans le même coin (ex: Vinteer, chat Vinted) — un
+  // recouvrement partiel fait que le clic tombe sur l'une ou l'autre selon
+  // l'endroit exact, ce qui donnait l'impression que rien ne se passait
+  // (signalé le 2026-07-17).
+  host.style.cssText = 'position:fixed;bottom:110px;right:20px;z-index:2147483647;'
   document.documentElement.appendChild(host)
   const root = host.attachShadow({ mode: 'open' })
 
