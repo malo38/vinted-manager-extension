@@ -95,8 +95,15 @@
     panel.classList.toggle('open')
     if (panel.classList.contains('open')) render()
   })
+  // Node.contains() ne traverse pas la frontière du Shadow DOM : il renvoyait
+  // toujours "pas contenu dans host" même pour un clic sur la bulle
+  // elle-même, donc ce gestionnaire refermait le panneau dans la même
+  // fraction de seconde que le clic qui venait de l'ouvrir (juste au-dessus)
+  // — impossible à voir à l'œil nu, donnait l'impression que rien ne se
+  // passait au clic (signalé le 2026-07-17). composedPath() traverse le
+  // Shadow DOM correctement, contrairement à contains().
   document.addEventListener('click', (e) => {
-    if (!host.contains(e.composedPath()[0]) && panel.classList.contains('open')) panel.classList.remove('open')
+    if (!e.composedPath().includes(host) && panel.classList.contains('open')) panel.classList.remove('open')
   })
 
   chrome.storage.onChanged.addListener((changes) => {
