@@ -60,10 +60,21 @@ async function backendFetch(method, path, body = null) {
 
   try {
     let r = await fetch(`${backend}${path}`, opts)
-    if (r.status === 401 && (await refreshAuthToken())) {
-      const { token: freshToken } = await getConfig()
-      opts.headers['Authorization'] = `Bearer ${freshToken}`
-      r = await fetch(`${backend}${path}`, opts)
+    if (r.status === 401) {
+      const refreshed = await refreshAuthToken()
+      if (refreshed) {
+        const { token: freshToken } = await getConfig()
+        opts.headers['Authorization'] = `Bearer ${freshToken}`
+        r = await fetch(`${backend}${path}`, opts)
+      } else {
+        // Le refresh token lui-même est mort (ex: ordi resté éteint assez
+        // longtemps) — sans ça, l'extension restait plantée en silence avec
+        // un vieux token, sans jamais dire à l'utilisateur qu'il fallait se
+        // reconnecter (signalé le 2026-07-17). En effaçant la session ici,
+        // le popup revient sur l'écran de connexion et le badge repasse gris.
+        await chrome.storage.local.remove(['vm_token', 'vm_refresh_token'])
+        return null
+      }
     }
     if (!r.ok) return null
     return r.json()
@@ -984,6 +995,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
   }
 })
 
+// Rafraîchit le token dès l'allumage de l'ordi, indépendamment de Vinted —
+// sinon, si aucun onglet vinted.fr n'est encore ouvert au démarrage,
+// syncVinted() s'arrête avant même d'appeler le backend (NO_TAB) et le
+// token ne se rafraîchit jamais tant que l'utilisateur n'a pas rouvert
+// Vinted lui-même (signalé le 2026-07-17 : ordi resté éteint ~24h, token
+// expiré, aucun message favoris envoyé même après le rallumage).
+chrome.runtime.onStartup.addListener(() => refreshAuthToken().catch(() => {}))
 chrome.runtime.onStartup.addListener(syncVinted)
 chrome.runtime.onStartup.addListener(() => updateStatusBadge().catch(() => {}))
 chrome.runtime.onInstalled.addListener(() => updateStatusBadge().catch(() => {}))
