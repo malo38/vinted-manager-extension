@@ -126,12 +126,15 @@ async function fetchVintedData() {
 
         // /my_orders per_page=100/page=1 seul ratait toute vente au-delà des 100
         // plus récentes (article resté coincé en "stock" pour toujours, signalé
-        // le 2026-07-15) — on pagine désormais jusqu'à 5 pages (500 commandes),
-        // même heuristique d'arrêt que les autres endpoints paginés de ce
-        // fichier (page renvoyée plus courte que per_page = dernière page).
+        // le 2026-07-15) — on pagine désormais jusqu'à 20 pages (2000 commandes,
+        // relevé de 5/500 le 2026-07-19 : un vendeur avec beaucoup d'ancienneté
+        // avait ses toutes premières ventes jamais vues par la synchro, donc
+        // jamais reconnues comme vendues). Sans coût pour les comptes plus
+        // petits : la boucle s'arrête dès qu'une page renvoie moins de 100
+        // résultats, donc ce plafond n'est atteint que par les gros historiques.
         async function fetchAllOrders(orderType) {
           let all = []
-          for (let page = 1; page <= 5; page++) {
+          for (let page = 1; page <= 20; page++) {
             const data = await apiGet('/my_orders', { per_page: '100', page: String(page), order_type: orderType })
             const batch = data.my_orders || []
             all.push(...batch)
