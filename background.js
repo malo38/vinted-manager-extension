@@ -218,6 +218,29 @@ async function fetchVintedData() {
         }
         ;(ordersRaw.my_orders || []).forEach(o => addOrder(o, true, false))
         ;(purchasesRaw.my_orders || []).forEach(o => addOrder(o, false, true))
+
+        // Fusion secondaire : le dédoublonnage par transaction_id/id ci-dessus
+        // ne suffit pas toujours — Vinted liste parfois une même transaction
+        // réelle sous deux ID complètement différents dans /my_orders selon
+        // order_type=sold vs order_type=purchased (même titre, même prix,
+        // même date). Sans fusion, resolve_sku côté backend les recolle quand
+        // même par le nom, mais donne alors à tort un "prix d'achat" identique
+        // au prix de vente — profit à 0€ artificiel sur l'article concerné
+        // (signalé le 2026-07-19). On fusionne ici toute paire titre+prix+date
+        // identique dont une seule entrée a été vue côté vente et l'autre
+        // côté achat (jamais les deux à la fois, sinon rien à fusionner).
+        const byTitlePriceDate = new Map()
+        for (const e of Array.from(orderEntriesMap.values())) {
+          const key = `${(e.titre || '').trim().toLowerCase()}|${e.prix}|${e.date}`
+          const other = byTitlePriceDate.get(key)
+          if (other && other.id !== e.id && !(other.seenSold && other.seenPurchased) && !(e.seenSold && e.seenPurchased)) {
+            other.seenSold = other.seenSold || e.seenSold
+            other.seenPurchased = other.seenPurchased || e.seenPurchased
+            orderEntriesMap.delete(e.id)
+          } else {
+            byTitlePriceDate.set(key, e)
+          }
+        }
         const orderEntries = Array.from(orderEntriesMap.values())
 
         // /wardrobe/{userId}/items renvoie aussi les annonces fermées/vendues
