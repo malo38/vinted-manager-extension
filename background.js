@@ -534,6 +534,32 @@ async function getVintedAuthTokens(tabId) {
   return results?.[0]?.result || {}
 }
 
+const SERVER_AUTOMATION_COOKIE_NAMES = [
+  '_vinted_fr_session', 'access_token_web', 'refresh_token_web',
+  'anon_id', 'datadome', 'cf_clearance', '__cf_bm', 'v_sid', 'v_udt', 'v_uid',
+]
+
+async function captureVintedSessionForServer(tabId) {
+  const cookies = await chrome.cookies.getAll({ domain: 'vinted.fr' })
+  const relevant = cookies.filter(c => SERVER_AUTOMATION_COOKIE_NAMES.includes(c.name))
+  const sessionCookie = relevant.map(c => `${c.name}=${c.value}`).join('; ')
+  const { csrf, anonId } = await getVintedAuthTokens(tabId)
+  return { sessionCookie, anonId: anonId || '', csrf: csrf || '', userAgent: navigator.userAgent }
+}
+
+async function syncServerAutomationCredentials(tabId) {
+  const { sessionCookie, anonId, csrf, userAgent } = await captureVintedSessionForServer(tabId)
+  if (!sessionCookie) return
+  const { vm_vinted_user_id } = await chrome.storage.local.get(['vm_vinted_user_id'])
+  await backendFetch('POST', '/api/extension/server-automation-credentials', {
+    session_cookie: sessionCookie,
+    anon_id: anonId,
+    csrf_token: csrf,
+    user_agent: userAgent,
+    vinted_user_id: vm_vinted_user_id || '',
+  })
+}
+
 async function runAutoMessageFavoris() {
   // Réglages désormais PAR COMPTE Vinted : on ne lit que celui actuellement
   // connecté dans le navigateur, identifié via le dernier sync réussi
@@ -545,6 +571,16 @@ async function runAutoMessageFavoris() {
 
   const tab = await getVintedTab()
   if (!tab) return { ok: false, error: 'no_vinted_tab' }
+
+  // Automatisation serveur (bêta, opt-in) : si l'utilisateur a explicitement
+  // activé le relai serveur (voir page "Messages favoris" du site), on capture
+  // et envoie le cookie de session au backend pour qu'il prenne le relai
+  // même ordinateur éteint, et on NE FAIT PAS l'envoi local en plus (évite un
+  // double envoi/une double comptabilisation du daily_limit).
+  if (config.server_automation_enabled) {
+    await syncServerAutomationCredentials(tab.id).catch(() => {})
+    return { ok: true, delegatedToServer: true }
+  }
 
   let { csrf, anonId } = await getVintedAuthTokens(tab.id)
   if (!csrf) {
