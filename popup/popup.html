@@ -49,6 +49,8 @@
     <span id="vintedBannerText">Vérification…</span>
   </div>
 
+  <div id="switchNotice" class="vinted-banner off" style="display:none"></div>
+
   <div id="loginSection">
     <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">Connectez-vous avec votre compte VintControl pour synchroniser vos données automatiquement.</p>
     <input type="email" id="email" placeholder="Email VintControl" />
@@ -66,7 +68,7 @@
     <button id="btnSync">🔄 Synchroniser maintenant</button>
     <button class="secondary" id="btnLogout">Déconnexion</button>
     <p class="hint">💡 Gardez un onglet vinted.fr ouvert pour que la synchronisation automatique fonctionne (toutes les 5 min).</p>
-    <p class="hint">🔀 Plusieurs comptes Vinted ? Déconnecte-toi de Vinted dans le navigateur, connecte-toi à l'autre compte puis synchronise — ça ajoute ce compte à VintControl sans effacer les données des autres comptes déjà connectés.</p>
+    <p class="hint">🔀 Plusieurs comptes Vinted ? Ce profil Chrome ne peut être connecté qu'à <strong>un seul</strong> compte Vinted à la fois — se reconnecter avec un autre compte fait basculer la synchro dessus (rien n'est perdu, mais un seul compte se synchronise à la fois). Pour synchroniser <strong>plusieurs comptes en même temps</strong>, crée un profil Chrome par compte Vinted (icône profil en haut à droite de Chrome → Ajouter un profil), installe l'extension dans chacun et connecte-toi une fois par profil — chaque profil tourne alors indépendamment, toutes les 5 min.</p>
   </div>
 
   <script src="popup.js"></script>

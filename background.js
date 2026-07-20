@@ -924,7 +924,17 @@ async function syncVinted() {
       chrome.action.setBadgeBackgroundColor({ color: '#ef4444' })
       return { ok: false, reason: 'backend_unreachable' }
     }
-    await setConfig({ vm_last_sync: new Date().toISOString(), vm_vinted_login: data.user.login, vm_vinted_user_id: data.user.id })
+    // Ce profil Chrome n'a qu'une session Vinted à la fois : si le compte connecté
+    // a changé depuis le dernier cycle, ce profil vient de "basculer" d'un compte à
+    // l'autre plutôt que de les synchroniser en parallèle. On garde une trace pour
+    // que le popup puisse le signaler clairement (voir vm_account_switch_notice).
+    const { vm_vinted_user_id: previousUserId, vm_vinted_login: previousLogin } =
+      await chrome.storage.local.get(['vm_vinted_user_id', 'vm_vinted_login'])
+    const configUpdate = { vm_last_sync: new Date().toISOString(), vm_vinted_login: data.user.login, vm_vinted_user_id: data.user.id }
+    if (previousUserId && previousUserId !== data.user.id) {
+      configUpdate.vm_account_switch_notice = { from: previousLogin, to: data.user.login, at: configUpdate.vm_last_sync }
+    }
+    await setConfig(configUpdate)
     notifyNewMessages(data.messages).catch(() => {})
     chrome.action.setBadgeText({ text: '✓' })
     chrome.action.setBadgeBackgroundColor({ color: '#00e5a0' })
@@ -984,19 +994,54 @@ chrome.tabs.onRemoved.addListener(() => updateStatusBadge().catch(() => {}))
 chrome.storage.onChanged.addListener(changes => { if (changes.vm_token) updateStatusBadge().catch(() => {}) })
 
 // ── Alarmes ──
-chrome.alarms.create('sync', { periodInMinutes: SYNC_INTERVAL_MIN })
-chrome.alarms.create('refresh_token', { periodInMinutes: 45 })
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === 'sync') {
-    const result = await syncVinted()
-    // Les deux automatisations ont besoin d'un onglet Vinted valide et d'une
-    // synchro qui vient de réussir (données à jour côté backend) avant de
-    // s'exécuter — inutile de les tenter si la synchro elle-même a échoué.
-    if (result.ok) {
-      await runAutoMessageFavoris().catch(() => {})
-      await runAutoRepublish().catch(() => {})
-    }
+// IMPORTANT : chrome.alarms.create() remplace toute alarme du même nom et repart
+// sur periodInMinutes à partir de MAINTENANT. Le service worker MV3 redémarre très
+// souvent (à chaque navigation dans n'importe quel onglet, via tabs.onActivated/
+// onUpdated/onRemoved ci-dessus, ou à l'ouverture du popup) — donc appeler create()
+// sans condition à chaque exécution du script remettait le compte à rebours à zéro
+// en permanence dès que l'utilisateur naviguait plus vite qu'une fois toutes les
+// 5 min, et la sync automatique (+ les messages favoris qui en dépendent) ne se
+// déclenchait quasiment jamais toute seule (signalé le 2026-07-20). Fix : ne créer
+// l'alarme que si elle n'existe pas déjà, pour ne jamais réinitialiser son horaire.
+async function ensureAlarms() {
+  const existing = await chrome.alarms.getAll()
+  const names = existing.map(a => a.name)
+  if (!names.includes('sync')) chrome.alarms.create('sync', { periodInMinutes: SYNC_INTERVAL_MIN })
+  if (!names.includes('refresh_token')) chrome.alarms.create('refresh_token', { periodInMinutes: 45 })
+}
+ensureAlarms()
+
+async function syncAndRunAutomations() {
+  const result = await syncVinted()
+  // Les deux automatisations ont besoin d'un onglet Vinted valide et d'une
+  // synchro qui vient de réussir (données à jour côté backend) avant de
+  // s'exécuter — inutile de les tenter si la synchro elle-même a échoué.
+  if (result.ok) {
+    await runAutoMessageFavoris().catch(() => {})
+    await runAutoRepublish().catch(() => {})
   }
+  return result
+}
+
+// Rattrape immédiatement une sync manquée après une longue pause (ordi en
+// veille, éteint, ou Chrome resté fermé) plutôt que de dépendre uniquement
+// du rattrapage natif de chrome.alarms au réveil — l'alarme 'sync' est bien
+// prévue pour se déclencher dès que possible au réveil de la machine, mais
+// ce filet de sécurité se déclenche dès le moindre réveil du service worker
+// (changement d'onglet, ouverture du popup...) si la dernière sync date de
+// plus d'un cycle, pour ne pas dépendre uniquement de ce comportement natif.
+async function catchUpIfStale() {
+  const { vm_token, vm_last_sync } = await chrome.storage.local.get(['vm_token', 'vm_last_sync'])
+  if (!vm_token) return
+  const staleMs = SYNC_INTERVAL_MIN * 60 * 1000
+  if (!vm_last_sync || (Date.now() - new Date(vm_last_sync).getTime()) > staleMs) {
+    await syncAndRunAutomations().catch(() => {})
+  }
+}
+catchUpIfStale()
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'sync') await syncAndRunAutomations()
   if (alarm.name === 'refresh_token') await refreshAuthToken()
 })
 
@@ -1007,7 +1052,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
     return true
   }
   if (msg.action === 'get_status') {
-    chrome.storage.local.get(['vm_token', 'vm_last_sync', 'vm_vinted_login'], respond)
+    chrome.storage.local.get(['vm_token', 'vm_last_sync', 'vm_vinted_login', 'vm_account_switch_notice'], respond)
+    return true
+  }
+  if (msg.action === 'ack_account_switch_notice') {
+    chrome.storage.local.remove(['vm_account_switch_notice'])
+    respond({ ok: true })
     return true
   }
   if (msg.action === 'save_token') {
@@ -1028,10 +1078,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, respond) => {
 // Vinted lui-même (signalé le 2026-07-17 : ordi resté éteint ~24h, token
 // expiré, aucun message favoris envoyé même après le rallumage).
 chrome.runtime.onStartup.addListener(() => refreshAuthToken().catch(() => {}))
-chrome.runtime.onStartup.addListener(syncVinted)
+chrome.runtime.onStartup.addListener(() => syncAndRunAutomations().catch(() => {}))
 chrome.runtime.onStartup.addListener(() => updateStatusBadge().catch(() => {}))
 chrome.runtime.onInstalled.addListener(() => updateStatusBadge().catch(() => {}))
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create('sync', { periodInMinutes: SYNC_INTERVAL_MIN })
-  chrome.alarms.create('refresh_token', { periodInMinutes: 45 })
-})
+chrome.runtime.onInstalled.addListener(() => ensureAlarms())

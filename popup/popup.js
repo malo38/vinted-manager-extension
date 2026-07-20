@@ -19,7 +19,7 @@ async function checkVintedTab() {
 }
 
 async function checkStatus() {
-  const status = await chrome.storage.local.get(['vm_token', 'vm_vinted_login', 'vm_last_sync']);
+  const status = await chrome.storage.local.get(['vm_token', 'vm_vinted_login', 'vm_last_sync', 'vm_account_switch_notice']);
   if (status?.vm_token) {
     document.getElementById('loginSection').style.display = 'none';
     document.getElementById('statusSection').style.display = 'block';
@@ -30,6 +30,19 @@ async function checkStatus() {
   } else {
     document.getElementById('loginSection').style.display = 'block';
     document.getElementById('statusSection').style.display = 'none';
+  }
+
+  // Signalé une fois puis acquitté (retiré du storage) pour ne pas réafficher
+  // la bannière à chaque ouverture du popup après que l'utilisateur l'a vue.
+  const notice = status?.vm_account_switch_notice;
+  const noticeEl = document.getElementById('switchNotice');
+  if (notice?.to) {
+    noticeEl.style.display = 'flex';
+    noticeEl.className = 'vinted-banner off';
+    noticeEl.innerHTML = `<span class="dot"></span><span>⚠️ Ce profil Chrome synchronise maintenant <strong>${notice.to}</strong>${notice.from ? ` (avant : ${notice.from})` : ''}. Un seul compte à la fois par profil — voir l'astuce ci-dessous pour en synchroniser plusieurs en parallèle.</span>`;
+    chrome.runtime.sendMessage({ action: 'ack_account_switch_notice' });
+  } else {
+    noticeEl.style.display = 'none';
   }
 }
 
