@@ -515,6 +515,59 @@ async function notifyNewMessages(messages) {
   await chrome.storage.local.set({ vm_notified_msg_keys: updatedKnown })
 }
 
+// ── Notifications "nouvelle vente" / "nouveau favori" ──
+// Même mécanisme que notifyNewMessages() ci-dessus (chrome.notifications,
+// dédoublonnage par état connu en storage.local) + relai vers
+// POST /api/push/notify pour recevoir la notif sur téléphone (Web Push, voir
+// supabase_push_subscriptions.sql côté backend). Limite connue : la
+// détection tourne ici, dans le service worker de l'extension — donc
+// seulement quand l'ordinateur est allumé. Si l'ordi est éteint au moment
+// d'une vente/d'un favori réel, la notif ne part qu'au prochain sync après
+// rallumage, pas en temps réel (décision actée avec l'utilisateur le
+// 2026-07-21 — un vrai temps réel demanderait un navigateur headless
+// tournant en continu côté serveur, hors scope).
+async function notifyAndPush(title, message, notifId) {
+  chrome.notifications.create(notifId, {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title,
+    message,
+    priority: 2,
+  })
+  await backendFetch('POST', '/api/push/notify', { title, body: message, url: '/' })
+}
+
+async function notifyNewSalesAndFavorites(data) {
+  const stored = await chrome.storage.local.get(['vm_notified_sale_ids', 'vm_known_favoris_counts'])
+  // Premier cycle après installation/mise à jour : on mémorise juste l'état
+  // de départ sans notifier, sinon toutes les ventes déjà existantes
+  // déclencheraient une notif d'un coup.
+  const isFirstRun = stored.vm_notified_sale_ids === undefined
+  const knownSaleIds = new Set(stored.vm_notified_sale_ids || [])
+  const knownFavoris = stored.vm_known_favoris_counts || {}
+
+  const newSales = (data.ventes || []).filter(v => !knownSaleIds.has(String(v.id)))
+  if (!isFirstRun) {
+    for (const v of newSales) {
+      const prixTxt = v.prix ? ` — ${Number(v.prix).toFixed(2).replace('.', ',')} €` : ''
+      await notifyAndPush('🎉 Nouvelle vente !', `${v.titre || 'Un article'}${prixTxt}`, `vm-sale-${v.id}`)
+    }
+  }
+  await chrome.storage.local.set({ vm_notified_sale_ids: (data.ventes || []).map(v => String(v.id)) })
+
+  // Compteur de favoris déjà présent dans chaque annonce synchronisée (voir
+  // fetchVintedData()) : zéro appel réseau supplémentaire nécessaire.
+  const updatedFavoris = {}
+  for (const a of (data.annonces || [])) {
+    updatedFavoris[a.id] = a.favoris
+    const prevCount = knownFavoris[a.id]
+    if (prevCount !== undefined && a.favoris > prevCount) {
+      await notifyAndPush('❤️ Nouveau favori', `${a.titre || 'Votre article'} vient d'être ajouté aux favoris.`, `vm-fav-${a.id}-${Date.now()}`)
+    }
+  }
+  await chrome.storage.local.set({ vm_known_favoris_counts: updatedFavoris })
+}
+
 // ── Message automatique aux favoris ──
 // Un seul envoi par cycle de sync (toutes les 5 min, voir SYNC_INTERVAL_MIN) :
 // pas de rafale ni d'attente artificielle dans le service worker (qui risque
@@ -972,6 +1025,7 @@ async function syncVinted() {
     }
     await setConfig(configUpdate)
     notifyNewMessages(data.messages).catch(() => {})
+    notifyNewSalesAndFavorites(data).catch(() => {})
     chrome.action.setBadgeText({ text: '✓' })
     chrome.action.setBadgeBackgroundColor({ color: '#00e5a0' })
     return { ok: true, ventes: data.ventes.length, annonces: data.annonces.length }
