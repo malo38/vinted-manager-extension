@@ -3,7 +3,7 @@
   "name": "VintControl",
   "version": "1.6.0",
   "description": "Synchronise automatiquement votre compte Vinted avec VintControl",
-  "permissions": ["storage", "alarms", "tabs", "scripting", "notifications", "cookies"],
+  "permissions": ["storage", "alarms", "tabs", "scripting", "notifications"],
   "host_permissions": [
     "https://www.vinted.fr/*",
     "https://api.vinted.fr/*",
