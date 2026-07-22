@@ -441,7 +441,13 @@ async function resolveOrderSides(tabId, orderEntries) {
   const { vm_conv_transaction_side, vm_conv_item_id } = await chrome.storage.local.get(['vm_conv_transaction_side', 'vm_conv_item_id'])
   const sideCache = vm_conv_transaction_side || {}
   const itemIdCache = vm_conv_item_id || {}
-  const toFetch = orderEntries.filter(o => o.conversation_id && !sideCache[o.conversation_id]).slice(0, 25)
+  // Plafond relevé de 25 à 60 (signalé le 2026-07-22) : pour un catalogue de
+  // plusieurs centaines d'articles, 25 résolutions/cycle ne rattrapait jamais
+  // le retard assez vite, et l'heuristique de repli (seenSold/seenPurchased,
+  // connue non fiable — voir plus haut) restait active des heures, causant de
+  // vraies ventes classées à tort en achats. 60 requêtes séquentielles vers
+  // /conversations/{id} par cycle de 5 min reste raisonnable côté anti-bot.
+  const toFetch = orderEntries.filter(o => o.conversation_id && !sideCache[o.conversation_id]).slice(0, 60)
 
   if (toFetch.length) {
     const results = await chrome.scripting.executeScript({
