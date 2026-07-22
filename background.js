@@ -794,7 +794,7 @@ async function runAutoRepublish() {
   // équivalent dans runAutoMessageFavoris()).
   const { vm_vinted_user_id } = await chrome.storage.local.get(['vm_vinted_user_id'])
   const config = await backendFetch('GET', `/api/extension/republish-config?vinted_user_id=${encodeURIComponent(vm_vinted_user_id || '')}`)
-  if (!config) return
+  if (!config) { console.log('[VintControl][republish] config injoignable (backend down ou token invalide)'); return }
 
   // Clic manuel "Republier maintenant" sur le site : passe devant la file
   // normale et ignore enabled/daily_limit — c'est une action explicite de
@@ -802,20 +802,23 @@ async function runAutoRepublish() {
   // (remise à null) dès cette lecture, donc pas de risque de la relancer au
   // cycle suivant.
   if (config.priority_vinted_item_id) {
-    await republishItemById(config.priority_vinted_item_id, vm_vinted_user_id)
+    const r = await republishItemById(config.priority_vinted_item_id, vm_vinted_user_id)
+    console.log('[VintControl][republish] priorité (clic manuel)', config.priority_vinted_item_id, '->', r)
     return
   }
 
-  if (!config.enabled) return
-  if (config.republished_today >= config.daily_limit) return
+  if (!config.enabled) { console.log('[VintControl][republish] désactivé (config.enabled=false)'); return }
+  if (config.republished_today >= config.daily_limit) { console.log(`[VintControl][republish] quota du jour atteint (${config.republished_today}/${config.daily_limit})`); return }
   // batch_size (par défaut 1) : combien d'articles traiter dans CE cycle —
   // au-delà de 1, on espace chaque republication d'une pause aléatoire
   // (comme pour les messages favoris) plutôt que de tout faire d'un coup.
   const batchSize = Math.max(1, config.batch_size || 1)
   const targets = (config.eligible_vinted_item_ids || []).slice(0, Math.min(batchSize, config.daily_limit - config.republished_today))
+  console.log(`[VintControl][republish] ${config.eligible_vinted_item_ids?.length || 0} éligible(s), ${targets.length} ciblé(s) ce cycle`, targets)
   for (let i = 0; i < targets.length; i++) {
     if (i > 0) await sleep(randomDelayMs(config.delay_min_sec, config.delay_max_sec))
-    await republishItemById(targets[i], vm_vinted_user_id)
+    const r = await republishItemById(targets[i], vm_vinted_user_id)
+    console.log('[VintControl][republish]', targets[i], '->', r)
   }
 }
 
